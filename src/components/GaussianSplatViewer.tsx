@@ -17,12 +17,13 @@ export function GaussianSplatViewer() {
 
   const getPhaseLabel = () => {
     switch (animationPhase) {
-      case 'downloading':
+      case 'downloading': {
         // Show actual download progress based on vertexCount
         const downloadPct = totalSplats > 0 
           ? Math.round((vertexCount / totalSplats) * 100)
           : 0;
         return `Downloading ${downloadPct}%`;
+      }
       case 'hold':
         return 'Processing...';
       case 'revealing':
@@ -171,6 +172,7 @@ other
       {/* Controls */}
       <div className="absolute bottom-3 left-4 z-50 flex gap-2">
         <button
+          type="button"
           onClick={() => setCarousel(!carousel)}
           className={`px-3 py-1.5 rounded text-xs font-medium transition-colors ${
             carousel

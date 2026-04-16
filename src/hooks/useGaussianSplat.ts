@@ -372,7 +372,7 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
         const splatData = new Uint8Array(contentLength);
         let bytesRead = 0;
         let lastVertexCount = -1;
-        let totalVertexCount = Math.floor(contentLength / rowLength);
+        const totalVertexCount = Math.floor(contentLength / rowLength);
         setTotalSplats(totalVertexCount);
 
         while (true) {
@@ -624,14 +624,10 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
     canvas.addEventListener('wheel', handleWheel, { passive: false });
 
     // Animation loop
-    let frameCount = 0;
-    
     const frame = (now: number) => {
       // ALWAYS schedule the next frame at the very beginning
       frameIdRef.current = requestAnimationFrame(frame);
-      
-      frameCount++;
-      
+
       // Throttle UI updates to ~20fps (every 50ms) to avoid pegging React scheduler
       const shouldUpdateUi = now - lastUiUpdateRef.current > 50;
       if (shouldUpdateUi) {

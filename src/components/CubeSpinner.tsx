@@ -1,6 +1,6 @@
 export function CubeSpinner() {
   return (
-    <div className="cube-wrapper" style={{ transformStyle: 'preserve-3d' }}>
+    <div className="cube-wrapper" style={{ transformStyle: 'preserve-3d', perspective: '800px' }}>
       <div
         className="cube"
         style={{
