@@ -655,6 +655,9 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
           setAnimationPhase('revealing');
           animationPhaseRef.current = 'revealing'; // Immediate ref update
           phase2StartTimeRef.current = performance.now();
+          // Force an immediate depth sort so the model is correct from the start of the reveal
+          forceSortOnCompleteRef.current = true;
+          lastViewProjRef.current = [];
         }, ANIMATION.DURATION_HOLD);
       }
 
@@ -670,12 +673,6 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
         // Sync UI state only if throttled and value changed
         if (shouldUpdateUi) {
           setAnimationProgress(unifiedProgress);
-        }
-        
-        // Precalculate correct depth sort BEFORE animation completes (at 95%)
-        if (phase2ProgressRef.current >= 0.95 && phase2ProgressRef.current < 1 && !forceSortOnCompleteRef.current) {
-          forceSortOnCompleteRef.current = true;
-          lastViewProjRef.current = [];
         }
       } else if (animationPhaseRef.current === 'hold' && shouldUpdateUi) {
         animationProgressRef.current = 90;
@@ -745,9 +742,8 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
           const viewProj = multiply4(projectionMatrixRef.current, actualViewMatrix);
           
           // Sorting strategy:
-          // - During animation: NO depth sorting (keep sequential order)
-          // - After animation completes: sort by camera depth
-          const isAnimating = phase2ProgressRef.current < 1.0;
+          // During revealing (unified phase), always sort by camera depth so the model is correct
+          const isRevealing = animationPhaseRef.current === 'revealing';
           
           // Always update lastViewProj so we track camera changes
           const dot = lastViewProjRef.current.length > 0 
@@ -756,14 +752,7 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
           
           const viewChanged = lastViewProjRef.current.length === 0 || Math.abs(dot - 1) > 0.01;
           
-          if (isAnimating) {
-            // During animation: don't sort by depth, keep current order
-            // But still track view changes for after animation
-            if (viewChanged) {
-              lastViewProjRef.current = viewProj;
-            }
-          } else {
-            // Animation complete: sort by camera depth
+          if (isRevealing) {
             const shouldSort = viewChanged || forceSortOnCompleteRef.current;
             
             if (shouldSort) {
@@ -773,6 +762,11 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
               if (forceSortOnCompleteRef.current) {
                 forceSortOnCompleteRef.current = false;
               }
+            }
+          } else {
+            // Not revealing yet: just track view changes
+            if (viewChanged) {
+              lastViewProjRef.current = viewProj;
             }
           }
 

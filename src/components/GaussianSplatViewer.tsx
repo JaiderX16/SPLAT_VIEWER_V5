@@ -27,8 +27,7 @@ export function GaussianSplatViewer() {
       case 'hold':
         return 'Processing...';
       case 'revealing':
-        // When revealing is complete (100%), show "Ready"
-        return animationProgress >= 100 ? 'Ready' : `Revealing ${animationProgress}%`;
+        return `Revealing ${animationProgress}%`;
       default:
         return '';
     }
