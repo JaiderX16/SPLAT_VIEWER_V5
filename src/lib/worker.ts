@@ -4,7 +4,6 @@ export function createWorker(self: Worker) {
   let viewProj: number[] | null = null;
   const rowLength = 3 * 4 + 3 * 4 + 4 + 4;
   let lastProj: number[] = [];
-  let depthIndex = new Uint32Array();
   let lastVertexCount = 0;
   let textureGenerated = false;
 
@@ -42,8 +41,8 @@ export function createWorker(self: Worker) {
     return (floatToHalf(x) | (floatToHalf(y) << 16)) >>> 0;
   }
 
-  function generateTexture() {
-    if (!buffer || vertexCount === 0) return;
+  function generateTexture(): { texdata: Uint32Array; texwidth: number; texheight: number } | null {
+    if (!buffer || vertexCount === 0) return null;
     const f_buffer = new Float32Array(buffer);
     const u_buffer = new Uint8Array(buffer);
 
@@ -103,21 +102,24 @@ export function createWorker(self: Worker) {
       texdata[8 * i + 6] = packHalf2x16(4 * sigma[4], 4 * sigma[5]);
     }
 
-    self.postMessage({ texdata, texwidth, texheight }, [texdata.buffer]);
     textureGenerated = true;
+    return { texdata, texwidth, texheight };
   }
 
   // Generate depth index sorted by view projection (back-to-front for correct alpha blending)
   function runSort(viewProjArg: number[], force = false) {
     if (!buffer || vertexCount === 0) return;
     const f_buffer = new Float32Array(buffer);
-    
+
     // Generate texture if needed
     if (!textureGenerated || lastVertexCount !== vertexCount) {
-      generateTexture();
+      const tex = generateTexture();
       lastVertexCount = vertexCount;
+      if (tex) {
+        self.postMessage({ texdata: tex.texdata, texwidth: tex.texwidth, texheight: tex.texheight, vertexCount }, [tex.texdata.buffer]);
+      }
     }
-    
+
     // Skip sort if view hasn't changed much (unless forced)
     if (!force && lastProj.length > 0) {
       const dot =
@@ -132,7 +134,7 @@ export function createWorker(self: Worker) {
     let maxDepth = -Infinity;
     let minDepth = Infinity;
     const sizeList = new Int32Array(vertexCount);
-    
+
     // Calculate depths from camera (for back-to-front rendering)
     for (let i = 0; i < vertexCount; i++) {
       const depth =
@@ -158,17 +160,17 @@ export function createWorker(self: Worker) {
 
     const depthInv = (256 * 256 - 1) / (maxDepth - minDepth);
     const counts0 = new Uint32Array(256 * 256);
-    
+
     for (let i = 0; i < vertexCount; i++) {
       sizeList[i] = ((sizeList[i] - minDepth) * depthInv) | 0;
       counts0[sizeList[i]]++;
     }
-    
+
     const starts0 = new Uint32Array(256 * 256);
     for (let i = 1; i < 256 * 256; i++)
       starts0[i] = starts0[i - 1] + counts0[i - 1];
-    
-    depthIndex = new Uint32Array(vertexCount);
+
+    const depthIndex = new Uint32Array(vertexCount);
     for (let i = 0; i < vertexCount; i++)
       depthIndex[starts0[sizeList[i]]++] = i;
 
@@ -325,30 +327,32 @@ export function createWorker(self: Worker) {
     } else if (e.data.buffer) {
       buffer = e.data.buffer;
       vertexCount = e.data.vertexCount;
-      // Generate texture immediately when buffer is received
-      if (vertexCount > 0 && !textureGenerated) {
-        generateTexture();
+
+      let tex = null;
+      if (vertexCount > 0 && (!textureGenerated || lastVertexCount !== vertexCount)) {
+        tex = generateTexture();
         lastVertexCount = vertexCount;
       }
-      // Send initial depth index (sequential) so rendering starts immediately
-      if (vertexCount > 0) {
-        const initialDepthIndex = new Uint32Array(vertexCount);
-        for (let i = 0; i < vertexCount; i++) initialDepthIndex[i] = i;
+
+      const initialDepthIndex = new Uint32Array(vertexCount);
+      for (let i = 0; i < vertexCount; i++) initialDepthIndex[i] = i;
+
+      if (tex) {
+        self.postMessage({
+          texdata: tex.texdata,
+          texwidth: tex.texwidth,
+          texheight: tex.texheight,
+          depthIndex: initialDepthIndex,
+          vertexCount,
+        }, [tex.texdata.buffer, initialDepthIndex.buffer]);
+      } else {
         self.postMessage({ depthIndex: initialDepthIndex, vertexCount }, [initialDepthIndex.buffer]);
-      }
-    } else if (e.data.vertexCount) {
-      vertexCount = e.data.vertexCount;
-      if (vertexCount > 0 && !textureGenerated) {
-        generateTexture();
-        lastVertexCount = vertexCount;
       }
     } else if (e.data.view) {
       viewProj = e.data.view;
-      // If force flag is set, reset lastProj to force a complete re-sort
       if (e.data.force === true) {
         lastProj = [];
       }
-      // Sort immediately - pass force flag if provided
       if (viewProj) runSort(viewProj, e.data.force === true);
     }
   };
