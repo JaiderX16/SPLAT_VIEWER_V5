@@ -1,10 +1,12 @@
-// Animation constants - PHASE 2 duration is fixed, but Phase 1 is dynamic based on download
+// Animation constants
 export const ANIMATION = {
-  DURATION_HOLD: 100,       // Hold between phases (ms) - fixed short pause
-  DURATION_P2: 5000,        // Splat reveal wave (ms) - fixed for visual effect
-  POINT_CLOUD_SCALE: 0.08,  // Scale factor for point cloud mode
-  RIPPLE_BAND: 0.15,        // Width of ripple effect
-  GLOW_COLOR: [0.65, 0.90, 1.0], // Cyan glow color
+  DURATION_P1: 5000,
+  DURATION_HOLD: 100,
+  DURATION_P2: 5000,
+  POINT_CLOUD_SCALE: 0.15, // V3 used POINT_CLOUD_EV 0.6 (~1.3px), this is roughly equivalent
+  RIPPLE_BAND_FACTOR: 0.05,
+  GROW_BAND_FACTOR: 0.18,
+  GLOW_COLOR: [0.65, 0.90, 1.0], // Original V3 Cyan Glow
 };
 
 export const vertexShaderSource = `
@@ -18,11 +20,13 @@ uniform vec2 focal;
 uniform vec2 viewport;
 
 // Wave animation uniforms
-uniform float u_phase1Progress;     // 0.0 to 1.0 based on download progress
-uniform float u_phase2Progress;     // 0.0 to 1.0 based on time after download
-uniform float u_maxDist;            // Maximum distance from scene center
-uniform vec3 u_sceneCenter;         // Center of the scene
-uniform float u_isPhase2;           // 0.0 = phase 1, 1.0 = phase 2
+uniform float u_elapsedMs;          // Timer 0 -> TOTAL
+uniform float u_maxDist;            // Max scene radius
+uniform vec3 u_sceneCenter;         // Center for the wave origin
+uniform float u_p1Dur;
+uniform float u_holdDur;
+uniform float u_p2Dur;
+uniform float u_showEverything;     // 1.0 = Bypass masks (for download)
 
 in vec2 position;
 in int index;
@@ -30,8 +34,7 @@ in int index;
 out vec4 vColor;
 out vec2 vPosition;
 
-// Easing function - smooth ease out
-float easeOut(float t) {
+float _easeOut(float t) {
     return 1.0 - pow(max(0.0, 1.0 - t), 2.5);
 }
 
@@ -47,28 +50,33 @@ void main () {
         return;
     }
 
-    // ── Wave Reveal Animation ─────────────────────────────────────────────
-    float dist = length(worldPos - u_sceneCenter);
+    // ── Wave Reveal Logic (V3 Port) ──────────────────────────────────────────
+    float _dist = length(worldPos - u_sceneCenter);
     
-    // Phase 1: All points visible as point cloud during download
-    // No wave effect - just show all loaded points
-    float p1Visible = 1.0;
+    // Wave 1: Point Cloud sweep
+    float _p1T = _easeOut(clamp(u_elapsedMs / u_p1Dur, 0.0, 1.0));
+    float _p1WaveR = _p1T * 1.05 * u_maxDist;
     
-    // Phase 2: Splat reveal wave (after all splats loaded)
-    float p2Ease = easeOut(clamp(u_phase2Progress, 0.0, 1.0));
-    float p2WaveR = p2Ease * 1.05 * u_maxDist;
+    // Wave 2: Splat Reveal sweep (starts after P1 + Hold)
+    float _p2Raw = clamp((u_elapsedMs - u_p1Dur - u_holdDur) / u_p2Dur, 0.0, 1.0);
+    float _p2T = _easeOut(_p2Raw);
+    float _p2WaveR = _p2T * 1.05 * u_maxDist;
     
-    // Ripple bands
-    float rippleBand = max(u_maxDist * 0.04, ${ANIMATION.RIPPLE_BAND.toFixed(2)});
-    float growBand = max(u_maxDist * 0.15, 0.50);
+    float _rippleBand = max(u_maxDist * ${ANIMATION.RIPPLE_BAND_FACTOR.toFixed(2)}, 0.15);
+    float _growBand   = max(u_maxDist * ${ANIMATION.GROW_BAND_FACTOR.toFixed(2)}, 0.60);
     
-    // Phase 2: splats grow from points to full gaussians based on wave
-    float p2Grow = clamp((p2WaveR - dist) / growBand, 0.0, 1.0);
+    // Phase 1 visibility
+    float _p1Visible = clamp((_p1WaveR - _dist) / _rippleBand, 0.0, 1.0);
+    if (u_showEverything > 0.5) _p1Visible = 1.0;
     
-    // Ripple glow effect at wave front (only during phase 2)
-    float p2Ripple = max(0.0, 1.0 - abs(dist - p2WaveR) / rippleBand);
-    float rippleGlow = p2Ripple * 0.7 * (1.0 - u_phase2Progress * 0.5);
-    // ───────────────────────────────────────────────────────────────────────
+    // Phase 2 growth (0 = dot, 1 = splat)
+    float growth = clamp((_p2WaveR - _dist) / _growBand, 0.0, 1.0);
+    
+    // Wave-front glow
+    float _p1Ripple = max(0.0, 1.0 - abs(_dist - _p1WaveR) / _rippleBand);
+    float _p2Ripple = max(0.0, 1.0 - abs(_dist - _p2WaveR) / _rippleBand);
+    float rippleGlow = max(_p1Ripple * 0.85, _p2Ripple * 0.75);
+    // ─────────────────────────────────────────────────────────────────────────
 
     uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0);
     vec2 u1 = unpackHalf2x16(cov.x), u2 = unpackHalf2x16(cov.y), u3 = unpackHalf2x16(cov.z);
@@ -93,20 +101,25 @@ void main () {
     }
     vec2 diagonalVector = normalize(vec2(cov2d[0][1], lambda1 - cov2d[0][0]));
     
-    // Scale: point cloud during phase 1, transition to full in phase 2
-    float baseScale = mix(${ANIMATION.POINT_CLOUD_SCALE.toFixed(2)}, 1.0, p2Grow * u_isPhase2);
+    // Inflation Logic
+    float baseScale = mix(${ANIMATION.POINT_CLOUD_SCALE.toFixed(2)}, 1.0, growth);
     vec2 majorAxis = min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector * baseScale;
     vec2 minorAxis = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x) * baseScale;
 
-    vColor = clamp(pos2d.z/pos2d.w+1.0, 0.0, 1.0) * vec4((cov.w) & 0xffu, (cov.w >> 8) & 0xffu, (cov.w >> 16) & 0xffu, (cov.w >> 24) & 0xffu) / 255.0;
+    vColor = vec4((cov.w) & 0xffu, (cov.w >> 8) & 0xffu, (cov.w >> 16) & 0xffu, (cov.w >> 24) & 0xffu) / 255.0;
     
-    // Apply wave visibility and cyan glow
-    vColor.a *= mix(p1Visible, 1.0, u_isPhase2);
+    // Apply V3 Glow
     vColor.rgb = mix(vColor.rgb, vec3(${ANIMATION.GLOW_COLOR[0].toFixed(2)}, ${ANIMATION.GLOW_COLOR[1].toFixed(2)}, ${ANIMATION.GLOW_COLOR[2].toFixed(2)}), rippleGlow);
     
+    // Point cloud visibility (Phase 1)
+    vColor.a *= _p1Visible;
+    
+    // Keep a subtle tint during development/loading phase if needed, but V3 was cleaner
+    vColor.rgb = mix(vColor.rgb * 0.8 + vec3(0.0, 0.2, 0.3), vColor.rgb, growth);
+    
     vPosition = position;
-
     vec2 vCenter = vec2(pos2d) / pos2d.w;
+    
     gl_Position = vec4(
         vCenter
         + position.x * majorAxis / viewport
