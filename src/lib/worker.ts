@@ -2,7 +2,7 @@ export function createWorker(self: Worker) {
   let buffer: ArrayBuffer | null = null;
   let vertexCount = 0;
   let viewProj: number[] | null = null;
-  const rowLength = 32; // 3*4 + 3*4 + 4 + 4
+  // const rowLength = 32; // 3*4 + 3*4 + 4 + 4 // unused
   let lastProj: number[] = [];
   let lastVertexCount = 0;
   let textureGenerated = false;
@@ -288,7 +288,7 @@ export function createWorker(self: Worker) {
       runSort(viewProj || [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1], true);
     } else if (e.data.view) {
       viewProj = e.data.view;
-      runSort(viewProj, e.data.force === true);
+      runSort(viewProj!, e.data.force === true);
     }
   };
 }

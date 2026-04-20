@@ -1,4 +1,4 @@
-import React from 'react';
+
 import { Download, Cpu, Activity, Info, Play, Pause } from 'lucide-react';
 
 interface ViewerHUDProps {

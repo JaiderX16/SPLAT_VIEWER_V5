@@ -1,4 +1,4 @@
-import React, { useRef, useState, useCallback, useEffect } from 'react';
+import { useRef, useState, useCallback, useEffect } from 'react';
 import { useSplatLoader } from '@/hooks/use-splat-loader';
 import { useSplatCamera } from '@/hooks/use-splat-camera';
 import { useSplatRenderer } from '@/hooks/use-splat-renderer';
@@ -13,7 +13,7 @@ export function GaussianSplatViewer() {
   const [fps, setFps] = useState(0);
   const [carousel, setCarousel] = useState(false);
   const [animationPhase, setAnimationPhase] = useState<'revealing' | 'ready' | 'downloading'>('downloading');
-  const [revealProgress, setRevealProgress] = useState(0);
+  // const [revealProgress, setRevealProgress] = useState(0); // unused
 
   // Animation & Rendering State Refs
   const phaseRef = useRef<'idle' | 'revealing' | 'ready'>('idle');
@@ -44,7 +44,7 @@ export function GaussianSplatViewer() {
     onDepthUpdate,
     onBoundsUpdate
   });
-  const { phase: loadPhase, progress: loadProgress, vertexCount, totalSplats, error, sendViewToSort } = loader;
+  const { phase: loadPhase, progress: _loadProgress, vertexCount, totalSplats, error, sendViewToSort } = loader;
 
   const camera = useSplatCamera(canvasRef);
   const { syncMatrices, updateMovement } = camera;
@@ -72,7 +72,7 @@ export function GaussianSplatViewer() {
   const onFrame = useCallback((now: number) => {
     const gl = rendererInstanceRef.current?.gl;
     const program = rendererInstanceRef.current?.program;
-    const { carousel: curCarousel, vertexCount: curVC, loadPhase: curLoadPhase } = stateRef.current;
+    const { carousel: curCarousel, vertexCount: curVC, loadPhase: _curLoadPhase } = stateRef.current;
     
     // Use refs for matrices to keep this function stable
     const viewMat = cameraRef.current.viewMatrixRef.current;
@@ -104,7 +104,7 @@ export function GaussianSplatViewer() {
           phaseRef.current = 'ready';
           setAnimationPhase('ready');
         }
-      } else if (phaseRef.current === 'idle' || (phaseRef.current === 'downloading' && !isActuallyReady)) {
+      } else if (phaseRef.current === 'idle') {
         elapsed = 0.0;
       }
 
@@ -124,7 +124,7 @@ export function GaussianSplatViewer() {
       gl.uniform1f(u.u_p1Dur, ANIMATION.DURATION_P1);
       gl.uniform1f(u.u_holdDur, ANIMATION.DURATION_HOLD);
       gl.uniform1f(u.u_p2Dur, ANIMATION.DURATION_P2);
-      gl.uniform1f(u.u_showEverything, (phaseRef.current === 'downloading' || (phaseRef.current === 'idle' && !isActuallyReady)) ? 1.0 : 0.0);
+      gl.uniform1f(u.u_showEverything, (phaseRef.current === 'idle' && !isActuallyReady) ? 1.0 : 0.0);
       
       gl.uniform1f(u.u_maxDist, sceneBoundsRef.current.maxDist);
       gl.uniform3fv(u.u_sceneCenter, sceneBoundsRef.current.center);
