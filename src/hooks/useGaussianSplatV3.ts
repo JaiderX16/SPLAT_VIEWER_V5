@@ -124,7 +124,7 @@ interface UseGaussianSplatV3Return {
   totalSplats: number;
   carousel: boolean;
   setCarousel: (value: boolean) => void;
-  loadSource: (source: string | File | null) => void;
+  loadSource: (source: string | File | null) => (() => void) | void;
 }
 
 export function useGaussianSplatV3(): UseGaussianSplatV3Return {
