@@ -6,7 +6,7 @@ const DURATION_P1 = 5000;
 const DURATION_HOLD = 100;
 const DURATION_P2 = 5000;
 const TOTAL_DURATION = DURATION_P1 + DURATION_HOLD + DURATION_P2;
-const POINT_CLOUD_EV = 1.0; // Use full eigenvalue for correct splat size
+// const POINT_CLOUD_EV = 1.0; // Use full eigenvalue for correct splat size
 
 const GLSL_HEADER = `
     uniform float u_elapsedMs;
@@ -127,6 +127,10 @@ interface UseGaussianSplatV3Return {
   carousel: boolean;
   setCarousel: (value: boolean) => void;
   loadSource: (source: string | File | null) => (() => void) | void;
+  splatScale: number;
+  setSplatScale: (value: number) => void;
+  modelScale: number;
+  setModelScale: (value: number) => void;
 }
 
 export function useGaussianSplatV3(): UseGaussianSplatV3Return {
@@ -270,18 +274,22 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
         const count = splatMesh?.getSplatCount?.() ?? 0;
         setVertexCount(count);
         setTotalSplats(count);
-          if (viewer.controls) {
-            viewer.controls.target.copy(center);
-            const camDist = Math.max(radius * 2, 1.5);
-            viewer.controls.minDistance = camDist * 0.5;
-            viewer.controls.maxDistance = camDist * 3;
-            const camPos = new THREE.Vector3().copy(center).add(new THREE.Vector3(0, 0, camDist));
-            viewer.camera.position.copy(camPos);
-            viewer.controls.update();
-          }
-          // Set global scale uniform (inverse of radius)
-          const mat = splatMesh.material;
-          mat.uniforms.u_globalScale = { value: Math.max(0.1, 1 / radius) };
+
+        const center = splatMesh?.sceneCenter || new THREE.Vector3(0, 0, 0);
+        const radius = splatMesh?.maxSplatDistanceFromSceneCenter || 10;
+
+        if (viewer.controls) {
+          viewer.controls.target.copy(center);
+          const camDist = Math.max(radius * 2, 1.5);
+          viewer.controls.minDistance = camDist * 0.5;
+          viewer.controls.maxDistance = camDist * 3;
+          const camPos = new THREE.Vector3().copy(center).add(new THREE.Vector3(0, 0, camDist));
+          viewer.camera.position.copy(camPos);
+          viewer.controls.update();
+        }
+        // Set global scale uniform (inverse of radius)
+        const mat = splatMesh.material;
+        mat.uniforms.u_globalScale = { value: Math.max(0.1, 1 / radius) };
 
         // Controls are ready for full interaction
 
