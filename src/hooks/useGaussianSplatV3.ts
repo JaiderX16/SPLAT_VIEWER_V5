@@ -31,7 +31,7 @@ function injectWaveReveal(material: any, maxRadius: number) {
   material.uniforms.u_holdDur = { value: DURATION_HOLD };
   material.uniforms.u_p2Dur = { value: DURATION_P2 };
   material.uniforms.u_maxDist = { value: maxDist };
-  material.uniforms.u_globalScale = { value: 1.0 };
+  // u_globalScale uniform is declared in GLSL_HEADER and set by caller
 
   material.vertexShader = material.vertexShader.replace(
     'uniform vec3 sceneCenter;',
@@ -63,15 +63,7 @@ function injectWaveReveal(material: any, maxRadius: number) {
             vec4 viewCenter = transformModelViewMatrix * vec4(splatCenter, 1.0);`
   );
 
-  // Replace basis vectors to use global scale instead of POINT_CLOUD_EV mixing
-  material.vertexShader = material.vertexShader.replace(
-    'vec2 basisVector1 = eigenVector1 * splatScale * min(sqrt8 * sqrt(eigenValue1)',
-    `vec2 basisVector1 = eigenVector1 * splatScale * min(sqrt8 * sqrt(eigenValue1) * u_globalScale, 1.0);`
-  );
-  material.vertexShader = material.vertexShader.replace(
-    'vec2 basisVector2 = eigenVector2 * splatScale * min(sqrt8 * sqrt(eigenValue2)',
-    `vec2 basisVector2 = eigenVector2 * splatScale * min(sqrt8 * sqrt(eigenValue2) * u_globalScale, 1.0);`
-  );
+  // Basis vectors are left unchanged so splats render at their original size
 
   const lastBrace = material.vertexShader.lastIndexOf('}');
   material.vertexShader =
@@ -257,67 +249,87 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
 
     let isActive = true;
 
-    viewer
-      .addSplatScene(fileUrl, {
-        showLoadingUI: false,
-        progressiveLoad: false,
-        format: GaussianSplats3D.SceneFormat.Splat,
-      })
-      .then(async () => {
-        if (!isActive) return;
-        if (progressInterval) clearInterval(progressInterval);
-        setProgress(100);
+    (async () => {
+      // Abort if this viewer was disposed while awaiting (e.g. StrictMode remount)
+      if (!isActive || viewerRef.current !== viewer) return;
 
-        await new Promise((r) => setTimeout(r, 100));
-
-        const splatMesh = viewer.getSplatMesh();
-        const count = splatMesh?.getSplatCount?.() ?? 0;
-        setVertexCount(count);
-        setTotalSplats(count);
-
-        const center = splatMesh?.sceneCenter || new THREE.Vector3(0, 0, 0);
-        const radius = splatMesh?.maxSplatDistanceFromSceneCenter || 10;
-
-        if (viewer.controls) {
-          viewer.controls.target.copy(center);
-          const camDist = Math.max(radius * 2, 1.5);
-          viewer.controls.minDistance = camDist * 0.5;
-          viewer.controls.maxDistance = camDist * 3;
-          const camPos = new THREE.Vector3().copy(center).add(new THREE.Vector3(0, 0, camDist));
-          viewer.camera.position.copy(camPos);
-          viewer.controls.update();
+      const tryLoad = async () => {
+        try {
+          await viewer.addSplatScene(fileUrl, {
+            showLoadingUI: false,
+            progressiveLoad: true,
+            format: GaussianSplats3D.SceneFormat.Splat,
+          });
+        } catch (err: any) {
+          if (err?.message?.includes('does not support progressive loading')) {
+            await viewer.addSplatScene(fileUrl, {
+              showLoadingUI: false,
+              progressiveLoad: false,
+              format: GaussianSplats3D.SceneFormat.Splat,
+            });
+          } else {
+            throw err;
+          }
         }
-        // Set global scale uniform (inverse of radius)
-        const mat = splatMesh.material;
-        mat.uniforms.u_globalScale = { value: Math.max(0.1, 1 / radius) };
+      };
 
-        // Controls are ready for full interaction
+      tryLoad()
+        .then(async () => {
+          if (!isActive) return;
+          if (progressInterval) clearInterval(progressInterval);
+          setProgress(100);
 
-        if (splatMesh?.material?.uniforms) {
-          setPhase('holding');
-          cancelAnimRef.current = runWaveAnimation(
-            splatMesh,
-            () => { if (isActive) setPhase('ready'); },
-            (p) => { if (isActive) setProgress(Math.round(p * 100)); }
-          );
-        }
-        if (isObjectUrl) {
-          URL.revokeObjectURL(fileUrl);
-        }
-      })
-      .catch((err: any) => {
-        if (!isActive) return;
-        if (progressInterval) clearInterval(progressInterval);
-        console.error('Error loading splat scene:', err);
-        // Ignore aborted-load errors caused by React StrictMode remounts
-        if (err?.name === 'AbortedPromiseError' || err?.message?.includes('Scene disposed')) {
-          return;
-        }
-        setError(err?.message || 'Error al cargar el modelo');
-        if (isObjectUrl) {
-          URL.revokeObjectURL(fileUrl);
-        }
-      })
+          await new Promise((r) => setTimeout(r, 100));
+
+          const splatMesh = viewer.getSplatMesh();
+          const count = splatMesh?.getSplatCount?.() ?? 0;
+          setVertexCount(count);
+          setTotalSplats(count);
+
+          const center = splatMesh?.sceneCenter || new THREE.Vector3(0, 0, 0);
+          const radius = splatMesh?.maxSplatDistanceFromSceneCenter || 10;
+
+          if (viewer.controls) {
+            viewer.controls.target.copy(center);
+            const camDist = Math.max(radius * 2, 1.5);
+            viewer.controls.minDistance = camDist * 0.5;
+            viewer.controls.maxDistance = camDist * 3;
+            const camPos = new THREE.Vector3().copy(center).add(new THREE.Vector3(0, 0, camDist));
+            viewer.camera.position.copy(camPos);
+            viewer.controls.update();
+          }
+          // Set global scale uniform (inverse of radius)
+          const mat = splatMesh.material;
+          mat.uniforms.u_globalScale = { value: Math.max(0.1, 1 / radius) };
+
+          // Controls are ready for full interaction
+
+          if (splatMesh?.material?.uniforms) {
+            setPhase('holding');
+            cancelAnimRef.current = runWaveAnimation(
+              splatMesh,
+              () => { if (isActive) setPhase('ready'); },
+              (p) => { if (isActive) setProgress(Math.round(p * 100)); }
+            );
+          }
+          if (isObjectUrl) {
+            URL.revokeObjectURL(fileUrl);
+          }
+        })
+        .catch((err: any) => {
+          if (!isActive) return;
+          if (progressInterval) clearInterval(progressInterval);
+          console.error('Error loading splat scene:', err);
+          // Ignore aborted-load errors caused by React StrictMode remounts
+          if (err?.name === 'AbortedPromiseError' || err?.message?.includes('Scene disposed')) {
+            return;
+          }
+          setError(err?.message || 'Error al cargar el modelo');
+          if (isObjectUrl) {
+            URL.revokeObjectURL(fileUrl);
+          }
+        });
+    })();
 
     // FPS loop
     const fpsLoop = (now: number) => {

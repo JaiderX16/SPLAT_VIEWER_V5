@@ -27,13 +27,14 @@ export default function Sidebar({
 
   return (
     <aside
+      style={{ transitionDuration: '600ms', transitionTimingFunction: 'cubic-bezier(0.22,1,0.36,1)' }}
       className={`
         absolute z-[20000] will-change-transform overflow-hidden
         top-4 left-4 bottom-4 w-[clamp(300px,28vw,360px)]
         flex flex-col rounded-[48px] border
         bg-[#1a1a1e]/70 backdrop-blur-[28px] border-white/[0.08]
         shadow-[0_8px_40px_rgba(0,0,0,0.6)]
-        transition-all duration-[600ms] ease-[cubic-bezier(0.22,1,0.36,1)]
+        transition-all
         ${!isOpen ? '-translate-x-[105%] opacity-0 scale-95' : 'translate-x-0 opacity-100 scale-100'}
       `}
     >
