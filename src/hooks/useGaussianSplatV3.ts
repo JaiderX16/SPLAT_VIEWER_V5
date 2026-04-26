@@ -192,6 +192,7 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
       initialCameraLookAt: [0, 0, 0],
       rootElement: container,
       sceneRevealMode: GaussianSplats3D.SceneRevealMode.Instant,
+      sharedMemoryForWorkers: false,
     });
 
     viewerRef.current = viewer;
