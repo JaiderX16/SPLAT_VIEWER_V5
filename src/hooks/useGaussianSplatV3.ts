@@ -142,7 +142,6 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
 
   const sourceRef = useRef<string | File | null>(null);
   const carouselRef = useRef(carousel);
-  const startTimeRef = useRef(Date.now() + 2000);
   const lastFrameRef = useRef(0);
   const avgFpsRef = useRef(0);
 
