@@ -30,7 +30,10 @@ export function GaussianSplatViewer({ source, onFileDrop }: GaussianSplatViewerP
     let cleanupFn: (() => void) | undefined;
     if (source && attemptedRef.current !== source) {
       attemptedRef.current = source;
-      cleanupFn = loadSource(source);
+      const result = loadSource(source);
+      if (typeof result === 'function') {
+        cleanupFn = result;
+      }
     }
     return () => {
       attemptedRef.current = null;
