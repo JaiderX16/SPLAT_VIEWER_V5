@@ -304,8 +304,7 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
     // Carousel
     const carouselLoop = () => {
       if (carouselRef.current && viewerRef.current?.controls) {
-        const t = Math.sin((Date.now() - startTimeRef.current) / 5000);
-        // controls autoRotate handles this automatically
+        // auto-rotate is handled by OrbitControls when enabled
       }
       requestAnimationFrame(carouselLoop);
     };
