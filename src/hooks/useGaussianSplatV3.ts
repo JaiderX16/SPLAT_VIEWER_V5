@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import * as GaussianSplats3D from '@mkkellogg/gaussian-splats-3d';
+import * as THREE from 'three';
 
 const DURATION_P1 = 5000;
 const DURATION_HOLD = 100;
 const DURATION_P2 = 5000;
 const TOTAL_DURATION = DURATION_P1 + DURATION_HOLD + DURATION_P2;
-const POINT_CLOUD_EV = 0.6;
+const POINT_CLOUD_EV = 1.0; // Use full eigenvalue for correct splat size
 
 const GLSL_HEADER = `
     uniform float u_elapsedMs;
@@ -13,6 +14,7 @@ const GLSL_HEADER = `
     uniform float u_holdDur;
     uniform float u_p2Dur;
     uniform float u_maxDist;
+    uniform float u_globalScale;
 
     float _easeOut(float t) {
         return 1.0 - pow(max(0.0, 1.0 - t), 2.5);
@@ -29,6 +31,7 @@ function injectWaveReveal(material: any, maxRadius: number) {
   material.uniforms.u_holdDur = { value: DURATION_HOLD };
   material.uniforms.u_p2Dur = { value: DURATION_P2 };
   material.uniforms.u_maxDist = { value: maxDist };
+  material.uniforms.u_globalScale = { value: 1.0 };
 
   material.vertexShader = material.vertexShader.replace(
     'uniform vec3 sceneCenter;',
@@ -60,15 +63,14 @@ function injectWaveReveal(material: any, maxRadius: number) {
             vec4 viewCenter = transformModelViewMatrix * vec4(splatCenter, 1.0);`
   );
 
+  // Replace basis vectors to use global scale instead of POINT_CLOUD_EV mixing
   material.vertexShader = material.vertexShader.replace(
     'vec2 basisVector1 = eigenVector1 * splatScale * min(sqrt8 * sqrt(eigenValue1)',
-    `float _ev1 = mix(${POINT_CLOUD_EV.toFixed(1)}, eigenValue1, _p2FadeIn);
-            float _ev2 = mix(${POINT_CLOUD_EV.toFixed(1)}, eigenValue2, _p2FadeIn);
-            vec2 basisVector1 = eigenVector1 * splatScale * min(sqrt8 * sqrt(_ev1)`
+    `vec2 basisVector1 = eigenVector1 * splatScale * min(sqrt8 * sqrt(eigenValue1) * u_globalScale, 1.0);`
   );
   material.vertexShader = material.vertexShader.replace(
     'vec2 basisVector2 = eigenVector2 * splatScale * min(sqrt8 * sqrt(eigenValue2)',
-    'vec2 basisVector2 = eigenVector2 * splatScale * min(sqrt8 * sqrt(_ev2)'
+    `vec2 basisVector2 = eigenVector2 * splatScale * min(sqrt8 * sqrt(eigenValue2) * u_globalScale, 1.0);`
   );
 
   const lastBrace = material.vertexShader.lastIndexOf('}');
@@ -139,6 +141,8 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
   const [vertexCount, setVertexCount] = useState(0);
   const [totalSplats, setTotalSplats] = useState(0);
   const [carousel, setCarousel] = useState(false);
+  const [splatScale, setSplatScale] = useState(1);
+  const [modelScale, setModelScale] = useState(1);
 
   const sourceRef = useRef<string | File | null>(null);
   const carouselRef = useRef(carousel);
@@ -153,6 +157,12 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
     cancelAnimRef.current?.();
     cancelAnimRef.current = null;
     if (viewerRef.current) {
+      try {
+        const c = viewerRef.current.controls;
+        if (c && (c as any).__stopAutoRotate) {
+          c.removeEventListener('start', (c as any).__stopAutoRotate);
+        }
+      } catch (_) {}
       try {
         const p = viewerRef.current.dispose();
         if (p && typeof p.catch === 'function') p.catch(() => {});
@@ -223,12 +233,22 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
       const c = viewer.controls;
       c.enableDamping = true;
       c.dampingFactor = 0.04;
+      c.enableZoom = true;
+      c.zoomSpeed = 1.2;
+      c.enableRotate = true;
+      c.rotateSpeed = 1.0;
+      c.enablePan = true;
+      c.panSpeed = 0.8;
+      c.screenSpacePanning = true;
       c.minPolarAngle = Math.PI * 0.10;
       c.maxPolarAngle = Math.PI * 0.82;
-      c.minDistance = 5.0;
-      c.maxDistance = 5.0;
+      c.minDistance = 0.1;
+      c.maxDistance = 100;
       c.autoRotate = true;
-      c.autoRotateSpeed = 4.0;
+      c.autoRotateSpeed = 2.0;
+      const stopAutoRotate = () => { c.autoRotate = false; };
+      c.addEventListener('start', stopAutoRotate);
+      (c as any).__stopAutoRotate = stopAutoRotate;
     }
 
     let isActive = true;
@@ -236,7 +256,7 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
     viewer
       .addSplatScene(fileUrl, {
         showLoadingUI: false,
-        progressiveLoad: false,
+        progressiveLoad: true,
         format: GaussianSplats3D.SceneFormat.Splat,
       })
       .then(async () => {
@@ -250,26 +270,20 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
         const count = splatMesh?.getSplatCount?.() ?? 0;
         setVertexCount(count);
         setTotalSplats(count);
+          if (viewer.controls) {
+            viewer.controls.target.copy(center);
+            const camDist = Math.max(radius * 2, 1.5);
+            viewer.controls.minDistance = camDist * 0.5;
+            viewer.controls.maxDistance = camDist * 3;
+            const camPos = new THREE.Vector3().copy(center).add(new THREE.Vector3(0, 0, camDist));
+            viewer.camera.position.copy(camPos);
+            viewer.controls.update();
+          }
+          // Set global scale uniform (inverse of radius)
+          const mat = splatMesh.material;
+          mat.uniforms.u_globalScale = { value: Math.max(0.1, 1 / radius) };
 
-        // Intro zoom: 5.0 → 2.3 over 4s
-        if (viewer.controls) {
-          const introStart = performance.now();
-          const introTick = () => {
-            if (!viewer.controls) return;
-            const t = Math.min((performance.now() - introStart) / 4000, 1);
-            const ease = 1 - Math.pow(1 - t, 3);
-            const dist = 5.0 + (2.3 - 5.0) * ease;
-            viewer.controls.minDistance = dist;
-            viewer.controls.maxDistance = dist;
-            if (t < 1) {
-              requestAnimationFrame(introTick);
-            } else {
-              viewer.controls.minDistance = 0.5;
-              viewer.controls.maxDistance = 20;
-            }
-          };
-          requestAnimationFrame(introTick);
-        }
+        // Controls are ready for full interaction
 
         if (splatMesh?.material?.uniforms) {
           setPhase('holding');
@@ -346,5 +360,9 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
     carousel,
     setCarousel,
     loadSource,
+    splatScale,
+    setSplatScale,
+    modelScale,
+    setModelScale,
   };
 }
