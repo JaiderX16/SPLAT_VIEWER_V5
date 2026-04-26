@@ -250,30 +250,27 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
     let isActive = true;
 
     (async () => {
-      // Abort if this viewer was disposed while awaiting (e.g. StrictMode remount)
+      let supportsProgressive = false;
+      if (isObjectUrl) {
+        supportsProgressive = true;
+      } else {
+        try {
+          const resp = await fetch(fileUrl, { method: 'HEAD' });
+          supportsProgressive = resp.headers.get('accept-ranges') === 'bytes';
+        } catch {
+          supportsProgressive = false;
+        }
+      }
+
+      // Abort if this viewer was disposed while awaiting HEAD (e.g. StrictMode remount)
       if (!isActive || viewerRef.current !== viewer) return;
 
-      const tryLoad = async () => {
-        try {
-          await viewer.addSplatScene(fileUrl, {
-            showLoadingUI: false,
-            progressiveLoad: true,
-            format: GaussianSplats3D.SceneFormat.Splat,
-          });
-        } catch (err: any) {
-          if (err?.message?.includes('does not support progressive loading')) {
-            await viewer.addSplatScene(fileUrl, {
-              showLoadingUI: false,
-              progressiveLoad: false,
-              format: GaussianSplats3D.SceneFormat.Splat,
-            });
-          } else {
-            throw err;
-          }
-        }
-      };
-
-      tryLoad()
+      viewer
+        .addSplatScene(fileUrl, {
+          showLoadingUI: false,
+          progressiveLoad: supportsProgressive,
+          format: GaussianSplats3D.SceneFormat.Splat,
+        })
         .then(async () => {
           if (!isActive) return;
           if (progressInterval) clearInterval(progressInterval);
