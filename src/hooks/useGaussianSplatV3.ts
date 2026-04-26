@@ -195,6 +195,11 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
       sharedMemoryForWorkers: false,
     });
 
+    // Force pure black background so stray edge splats don't tint the screen
+    if (viewer.renderer) {
+      viewer.renderer.setClearColor(0x000000, 1);
+    }
+
     viewerRef.current = viewer;
 
     // For local files we can't easily track download progress, so we fake it
@@ -282,6 +287,10 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
         if (!isActive) return;
         if (progressInterval) clearInterval(progressInterval);
         console.error('Error loading splat scene:', err);
+        // Ignore aborted-load errors caused by React StrictMode remounts
+        if (err?.name === 'AbortedPromiseError' || err?.message?.includes('Scene disposed')) {
+          return;
+        }
         setError(err?.message || 'Error al cargar el modelo');
         if (isObjectUrl) {
           URL.revokeObjectURL(fileUrl);
