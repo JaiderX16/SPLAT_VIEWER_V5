@@ -1,7 +1,7 @@
 export function getProjectionMatrix(fx: number, fy: number, width: number, height: number): number[] {
   const znear = 0.2;
   const zfar = 200;
-  // Pre-allocate array for better performance
+  // Exact match to Mark Kellogg's reference implementation
   const m = new Array(16).fill(0);
   m[0] = (2 * fx) / width;
   m[5] = -(2 * fy) / height;

@@ -3,10 +3,10 @@ export const ANIMATION = {
   DURATION_P1: 5000,
   DURATION_HOLD: 100,
   DURATION_P2: 5000,
-  POINT_CLOUD_SCALE: 0.15, // V3 used POINT_CLOUD_EV 0.6 (~1.3px), this is roughly equivalent
+  POINT_CLOUD_SCALE: 0.15,
   RIPPLE_BAND_FACTOR: 0.05,
   GROW_BAND_FACTOR: 0.18,
-  GLOW_COLOR: [0.65, 0.90, 1.0], // Original V3 Cyan Glow
+  GLOW_COLOR: [0.65, 0.90, 1.0],
 };
 
 export const vertexShaderSource = `
@@ -19,14 +19,14 @@ uniform mat4 projection, view;
 uniform vec2 focal;
 uniform vec2 viewport;
 
-// Wave animation uniforms
-uniform float u_elapsedMs;          // Timer 0 -> TOTAL
-uniform float u_maxDist;            // Max scene radius
-uniform vec3 u_sceneCenter;         // Center for the wave origin
+uniform float u_elapsedMs;
+uniform float u_maxDist;
+uniform vec3 u_sceneCenter;
 uniform float u_p1Dur;
 uniform float u_holdDur;
 uniform float u_p2Dur;
-uniform float u_showEverything;     // 1.0 = Bypass masks (for download)
+uniform float u_showEverything;
+uniform float u_modelScale;
 
 in vec2 position;
 in int index;
@@ -40,7 +40,7 @@ float _easeOut(float t) {
 
 void main () {
     uvec4 cen = texelFetch(u_texture, ivec2((uint(index) & 0x3ffu) << 1, uint(index) >> 10), 0);
-    vec3 worldPos = uintBitsToFloat(cen.xyz);
+    vec3 worldPos = uintBitsToFloat(cen.xyz) * u_modelScale;
     vec4 cam = view * vec4(worldPos, 1);
     vec4 pos2d = projection * cam;
 
@@ -50,33 +50,29 @@ void main () {
         return;
     }
 
-    // ── Wave Reveal Logic (V3 Port) ──────────────────────────────────────────
     float _dist = length(worldPos - u_sceneCenter);
-    
-    // Wave 1: Point Cloud sweep
-    float _p1T = _easeOut(clamp(u_elapsedMs / u_p1Dur, 0.0, 1.0));
+
+    float _p1T = _easeOut(clamp(u_elapsedMs / max(u_p1Dur, 1.0), 0.0, 1.0));
     float _p1WaveR = _p1T * 1.05 * u_maxDist;
-    
-    // Wave 2: Splat Reveal sweep (starts after P1 + Hold)
-    float _p2Raw = clamp((u_elapsedMs - u_p1Dur - u_holdDur) / u_p2Dur, 0.0, 1.0);
+
+    float _p2Raw = clamp((u_elapsedMs - u_p1Dur - u_holdDur) / max(u_p2Dur, 1.0), 0.0, 1.0);
     float _p2T = _easeOut(_p2Raw);
-    float _p2WaveR = _p2T * 1.05 * u_maxDist;
-    
+    float _p2WaveR = _p2T * 1.4 * u_maxDist;
+
     float _rippleBand = max(u_maxDist * ${ANIMATION.RIPPLE_BAND_FACTOR.toFixed(2)}, 0.15);
     float _growBand   = max(u_maxDist * ${ANIMATION.GROW_BAND_FACTOR.toFixed(2)}, 0.60);
-    
-    // Phase 1 visibility
+
     float _p1Visible = clamp((_p1WaveR - _dist) / _rippleBand, 0.0, 1.0);
-    if (u_showEverything > 0.5) _p1Visible = 1.0;
-    
-    // Phase 2 growth (0 = dot, 1 = splat)
     float growth = clamp((_p2WaveR - _dist) / _growBand, 0.0, 1.0);
-    
-    // Wave-front glow
+
+    if (u_showEverything > 0.5) {
+        _p1Visible = 1.0;
+        growth = 1.0;
+    }
+
     float _p1Ripple = max(0.0, 1.0 - abs(_dist - _p1WaveR) / _rippleBand);
-    float _p2Ripple = max(0.0, 1.0 - abs(_dist - _p2WaveR) / _rippleBand);
+    float _p2Ripple = max(0.0, 1.0 - abs(_dist - _p2WaveR) / _growBand);
     float rippleGlow = max(_p1Ripple * 0.85, _p2Ripple * 0.75);
-    // ─────────────────────────────────────────────────────────────────────────
 
     uvec4 cov = texelFetch(u_texture, ivec2(((uint(index) & 0x3ffu) << 1) | 1u, uint(index) >> 10), 0);
     vec2 u1 = unpackHalf2x16(cov.x), u2 = unpackHalf2x16(cov.y), u3 = unpackHalf2x16(cov.z);
@@ -100,26 +96,23 @@ void main () {
         return;
     }
     vec2 diagonalVector = normalize(vec2(cov2d[0][1], lambda1 - cov2d[0][0]));
-    
-    // Inflation Logic
-    float baseScale = mix(${ANIMATION.POINT_CLOUD_SCALE.toFixed(2)}, 1.0, growth);
-    vec2 majorAxis = min(sqrt(2.0 * lambda1), 1024.0) * diagonalVector * baseScale;
-    vec2 minorAxis = min(sqrt(2.0 * lambda2), 1024.0) * vec2(diagonalVector.y, -diagonalVector.x) * baseScale;
 
-    vColor = vec4((cov.w) & 0xffu, (cov.w >> 8) & 0xffu, (cov.w >> 16) & 0xffu, (cov.w >> 24) & 0xffu) / 255.0;
-    
-    // Apply V3 Glow
+    float baseScale = mix(${ANIMATION.POINT_CLOUD_SCALE.toFixed(2)}, 1.0, growth);
+    vec2 majorAxis = min(sqrt(2.0 * lambda1), 2048.0) * diagonalVector * baseScale;
+    vec2 minorAxis = min(sqrt(2.0 * lambda2), 2048.0) * vec2(diagonalVector.y, -diagonalVector.x) * baseScale;
+
+    float depthFade = clamp(pos2d.z / pos2d.w + 1.0, 0.0, 1.0);
+    vColor = depthFade * vec4((cov.w) & 0xffu, (cov.w >> 8) & 0xffu, (cov.w >> 16) & 0xffu, (cov.w >> 24) & 0xffu) / 255.0;
+
     vColor.rgb = mix(vColor.rgb, vec3(${ANIMATION.GLOW_COLOR[0].toFixed(2)}, ${ANIMATION.GLOW_COLOR[1].toFixed(2)}, ${ANIMATION.GLOW_COLOR[2].toFixed(2)}), rippleGlow);
-    
-    // Point cloud visibility (Phase 1)
+
     vColor.a *= _p1Visible;
-    
-    // Keep a subtle tint during development/loading phase if needed, but V3 was cleaner
+
     vColor.rgb = mix(vColor.rgb * 0.8 + vec3(0.0, 0.2, 0.3), vColor.rgb, growth);
-    
+
     vPosition = position;
     vec2 vCenter = vec2(pos2d) / pos2d.w;
-    
+
     gl_Position = vec4(
         vCenter
         + position.x * majorAxis / viewport

@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Camera } from '@/types';
-import { 
-  getProjectionMatrix, 
-  multiply4, 
-  invert4, 
-  rotate4, 
-  translate4 
+import {
+  getProjectionMatrix,
+  multiply4,
+  invert4,
+  rotate4,
+  translate4,
 } from '@/lib/math';
 import { createWorker } from '@/lib/worker';
 import { vertexShaderSource, fragmentShaderSource, ANIMATION } from '@/lib/shaders';
@@ -22,51 +22,53 @@ const defaultCameras: Camera[] = [
       [-0.04747421839895102, 0.9972110940209488, -0.057586739349882114],
       [-0.4797239414934443, 0.027805376500959853, 0.8769787916452908],
     ],
+    // Real focal lengths from the original camera calibration
     fy: 1164.6601287484507,
     fx: 1159.5880733038064,
   },
 ];
 
+// Camera much closer so splats project larger on screen (v3 zooms to ~2.3)
 const defaultViewMatrix: number[] = [
-  0.47, 0.04, 0.88, 0, -0.11, 0.99, 0.02, 0, -0.88, -0.11, 0.47, 0, 0.07,
-  0.03, 6.55, 1,
+  0.47, 0.04, 0.88, 0, -0.11, 0.99, 0.02, 0, -0.88, -0.11, 0.47, 0, 0.05,
+  0.02, 3.0, 1,
 ];
 
-// Animation states - merged: revealing now includes the final correct render
-type AnimationPhase = 'downloading' | 'hold' | 'revealing';
+const TOTAL_DURATION = ANIMATION.DURATION_P1 + ANIMATION.DURATION_HOLD + ANIMATION.DURATION_P2;
 
 interface UseGaussianSplatReturn {
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
-  isLoading: boolean;
-  error: string | null;
+  phase: 'downloading' | 'holding' | 'ready';
+  progress: number;
   fps: number;
+  error: string | null;
   vertexCount: number;
   totalSplats: number;
-  animationPhase: AnimationPhase;
-  animationProgress: number;
   carousel: boolean;
   setCarousel: (value: boolean) => void;
+  modelScale: number;
+  setModelScale: (value: number) => void;
 }
 
-export function useGaussianSplat(): UseGaussianSplatReturn {
+export function useGaussianSplat(source: string | File | null): UseGaussianSplatReturn {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [phase, setPhase] = useState<'downloading' | 'holding' | 'ready'>('downloading');
+  const [progress, setProgress] = useState(0);
   const [fps, setFps] = useState(0);
+  const [error, setError] = useState<string | null>(null);
   const [vertexCount, setVertexCount] = useState(0);
   const vertexCountRef = useRef(0);
   const [totalSplats, setTotalSplats] = useState(0);
   const totalSplatsRef = useRef(0);
-  const downloadCompleteRef = useRef(false);
-  const [animationPhase, setAnimationPhase] = useState<AnimationPhase>('downloading');
-  const [animationProgress, setAnimationProgress] = useState(0);
   const [carousel, setCarousel] = useState(false);
+  const [modelScale, setModelScale] = useState(1.0);
+  const modelScaleRef = useRef(1.0);
 
   // WebGL refs
   const glRef = useRef<WebGL2RenderingContext | null>(null);
   const programRef = useRef<WebGLProgram | null>(null);
   const workerRef = useRef<Worker | null>(null);
-  
+
   // Camera and view refs
   const viewMatrixRef = useRef<number[]>(defaultViewMatrix);
   const projectionMatrixRef = useRef<number[]>([]);
@@ -74,16 +76,16 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
   const activeKeysRef = useRef<string[]>([]);
   const carouselRef = useRef(carousel);
   const startTimeRef = useRef(Date.now() + 2000);
-  
-  // Animation refs
-  const animationPhaseRef = useRef<AnimationPhase>('downloading');
-  const phase1ProgressRef = useRef(0);
-  const phase2ProgressRef = useRef(0);
-  const phase2StartTimeRef = useRef<number | null>(null);
+
+  // Scene bounds
   const sceneCenterRef = useRef<[number, number, number]>([0, 0, 0]);
-  const maxDistRef = useRef(100); 
-  const animationProgressRef = useRef(0);
-  
+  const maxDistRef = useRef(100);
+
+  // Animation refs
+  const animationPhaseRef = useRef<'downloading' | 'revealing' | 'ready'>('downloading');
+  const downloadCompleteRef = useRef(false);
+  const revealStartTimeRef = useRef(0);
+
   // Performance refs
   const lastFrameRef = useRef(0);
   const avgFpsRef = useRef(0);
@@ -94,30 +96,23 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
   const lastDownloadUiUpdateRef = useRef(0);
   const lastTexturedVertexCountRef = useRef(0);
   const frameIdRef = useRef<number | null>(null);
-  
+
   // WebGL resource refs for cleanup
   const vertexBufferRef = useRef<WebGLBuffer | null>(null);
   const indexBufferRef = useRef<WebGLBuffer | null>(null);
   const textureRef = useRef<WebGLTexture | null>(null);
   const resizeUniformsRef = useRef<{ focal: WebGLUniformLocation | null; viewport: WebGLUniformLocation | null; projection: WebGLUniformLocation | null } | null>(null);
-  
+
   // Uniform locations ref
-  const uniformsRef = useRef<{
-    view: WebGLUniformLocation | null;
-    phase1Progress: WebGLUniformLocation | null;
-    phase2Progress: WebGLUniformLocation | null;
-    maxDist: WebGLUniformLocation | null;
-    sceneCenter: WebGLUniformLocation | null;
-    isPhase2: WebGLUniformLocation | null;
-  } | null>(null);
+  const uniformsRef = useRef<Record<string, WebGLUniformLocation | null>>({});
 
   useEffect(() => {
     carouselRef.current = carousel;
   }, [carousel]);
 
   useEffect(() => {
-    animationPhaseRef.current = animationPhase;
-  }, [animationPhase]);
+    modelScaleRef.current = modelScale;
+  }, [modelScale]);
 
   useEffect(() => {
     vertexCountRef.current = vertexCount;
@@ -127,30 +122,50 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
     totalSplatsRef.current = totalSplats;
   }, [totalSplats]);
 
-  const updateFps = useCallback((newFps: number) => {
-    const now = Date.now();
-    if (now - fpsUpdateRef.current > 500) {
-      setFps(newFps);
-      fpsUpdateRef.current = now;
-    }
-  }, []);
-
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
+    let isCancelled = false;
+
+    // Reset all state for new source
+    viewMatrixRef.current = [...defaultViewMatrix];
+    projectionMatrixRef.current = [];
+    activeKeysRef.current = [];
+    carouselRef.current = carousel;
+    startTimeRef.current = Date.now() + 2000;
+    animationPhaseRef.current = 'downloading';
+    downloadCompleteRef.current = false;
+    revealStartTimeRef.current = 0;
+    sceneCenterRef.current = [0, 0, 0];
+    maxDistRef.current = 100;
+    lastViewProjRef.current = [];
+    forceSortRef.current = false;
+    lastTexturedVertexCountRef.current = 0;
+    lastFrameRef.current = 0;
+    avgFpsRef.current = 0;
+    lastUiUpdateRef.current = 0;
+    lastDownloadUiUpdateRef.current = 0;
+    frameIdRef.current = null;
+
+    setPhase('downloading');
+    setProgress(0);
+    setVertexCount(0);
+    setTotalSplats(0);
+    setFps(0);
+    setError(null);
+
     // Initialize WebGL2
-    const gl = canvas.getContext('webgl2', { 
+    const gl = canvas.getContext('webgl2', {
       antialias: false,
       powerPreference: 'high-performance',
     });
-    
+
     if (!gl) {
       setError('WebGL2 not supported. Please use a modern browser.');
-      setIsLoading(false);
       return;
     }
-    
+
     glRef.current = gl;
 
     // Create and compile shaders
@@ -158,7 +173,6 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
     const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
     if (!vertexShader || !fragmentShader) {
       setError('Failed to create shaders');
-      setIsLoading(false);
       return;
     }
 
@@ -170,13 +184,11 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
     if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
       console.error('Vertex shader error:', gl.getShaderInfoLog(vertexShader));
       setError('Vertex shader compilation failed');
-      setIsLoading(false);
       return;
     }
     if (!gl.getShaderParameter(fragmentShader, gl.COMPILE_STATUS)) {
       console.error('Fragment shader error:', gl.getShaderInfoLog(fragmentShader));
       setError('Fragment shader compilation failed');
-      setIsLoading(false);
       return;
     }
 
@@ -184,21 +196,19 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
     const program = gl.createProgram();
     if (!program) {
       setError('Failed to create WebGL program');
-      setIsLoading(false);
       return;
     }
-    
+
     gl.attachShader(program, vertexShader);
     gl.attachShader(program, fragmentShader);
     gl.linkProgram(program);
-    
+
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
       console.error('Program link error:', gl.getProgramInfoLog(program));
       setError('WebGL program linking failed');
-      setIsLoading(false);
       return;
     }
-    
+
     gl.useProgram(program);
     programRef.current = program;
 
@@ -214,13 +224,21 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
     gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
 
     // Cache uniform locations
+    const getUniform = (name: string) => gl.getUniformLocation(program, name);
     uniformsRef.current = {
-      view: gl.getUniformLocation(program, 'view'),
-      phase1Progress: gl.getUniformLocation(program, 'u_phase1Progress'),
-      phase2Progress: gl.getUniformLocation(program, 'u_phase2Progress'),
-      maxDist: gl.getUniformLocation(program, 'u_maxDist'),
-      sceneCenter: gl.getUniformLocation(program, 'u_sceneCenter'),
-      isPhase2: gl.getUniformLocation(program, 'u_isPhase2'),
+      view: getUniform('view'),
+      projection: getUniform('projection'),
+      focal: getUniform('focal'),
+      viewport: getUniform('viewport'),
+      u_texture: getUniform('u_texture'),
+      u_elapsedMs: getUniform('u_elapsedMs'),
+      u_p1Dur: getUniform('u_p1Dur'),
+      u_holdDur: getUniform('u_holdDur'),
+      u_p2Dur: getUniform('u_p2Dur'),
+      u_showEverything: getUniform('u_showEverything'),
+      u_maxDist: getUniform('u_maxDist'),
+      u_sceneCenter: getUniform('u_sceneCenter'),
+      u_modelScale: getUniform('u_modelScale'),
     };
 
     // Create worker
@@ -235,9 +253,9 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
 
     // Cache resize uniform locations once
     resizeUniformsRef.current = {
-      focal: gl.getUniformLocation(program, 'focal'),
-      viewport: gl.getUniformLocation(program, 'viewport'),
-      projection: gl.getUniformLocation(program, 'projection'),
+      focal: getUniform('focal'),
+      viewport: getUniform('viewport'),
+      projection: getUniform('projection'),
     };
 
     // Setup geometry buffers
@@ -254,7 +272,7 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
     const texture = gl.createTexture();
     textureRef.current = texture;
     gl.bindTexture(gl.TEXTURE_2D, texture);
-    const u_textureLocation = gl.getUniformLocation(program, 'u_texture');
+    const u_textureLocation = getUniform('u_texture');
     gl.uniform1i(u_textureLocation, 0);
 
     // Setup index buffer
@@ -294,7 +312,6 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
         const { depthIndex, vertexCount: vc } = e.data;
         gl.bindBuffer(gl.ARRAY_BUFFER, indexBuffer);
         gl.bufferData(gl.ARRAY_BUFFER, depthIndex, gl.DYNAMIC_DRAW);
-        // Throttle React state update for vertex count
         vertexCountRef.current = vc;
         const now = performance.now();
         if (now - lastDownloadUiUpdateRef.current > 200) {
@@ -309,21 +326,24 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
       const ru = resizeUniformsRef.current;
       if (!ru) return;
 
-      gl.uniform2fv(ru.focal, new Float32Array([cameraRef.current.fx, cameraRef.current.fy]));
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const cssW = window.innerWidth;
+      const cssH = window.innerHeight;
+      const fbW = Math.round(cssW * dpr);
+      const fbH = Math.round(cssH * dpr);
 
-      projectionMatrixRef.current = getProjectionMatrix(
-        cameraRef.current.fx,
-        cameraRef.current.fy,
-        window.innerWidth,
-        window.innerHeight,
-      );
+      canvas.width = fbW;
+      canvas.height = fbH;
+      gl.viewport(0, 0, fbW, fbH);
 
-      gl.uniform2fv(ru.viewport, new Float32Array([window.innerWidth, window.innerHeight]));
+      // Scale focal by DPR so the projected splat size stays constant in CSS pixels
+      // while the internal framebuffer resolution increases for sharper rendering.
+      const fx = cameraRef.current.fx * dpr;
+      const fy = cameraRef.current.fy * dpr;
+      gl.uniform2fv(ru.focal, new Float32Array([fx, fy]));
+      gl.uniform2fv(ru.viewport, new Float32Array([fbW, fbH]));
 
-      canvas.width = Math.round(window.innerWidth);
-      canvas.height = Math.round(window.innerHeight);
-      gl.viewport(0, 0, canvas.width, canvas.height);
-
+      projectionMatrixRef.current = getProjectionMatrix(fx, fy, fbW, fbH);
       gl.uniformMatrix4fv(ru.projection, false, projectionMatrixRef.current);
     };
 
@@ -334,9 +354,9 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
     const calculateSceneBounds = (splatData: Uint8Array, currentCount?: number) => {
       const f_buffer = new Float32Array(splatData.buffer);
       const numSplats = currentCount ?? Math.floor(splatData.length / 32);
-      
+
       if (numSplats === 0) return;
-      
+
       let cx = 0, cy = 0, cz = 0;
       let minX = Infinity, maxX = -Infinity;
       let minY = Infinity, maxY = -Infinity;
@@ -368,105 +388,159 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
       );
 
       sceneCenterRef.current = [cx, cy, cz];
-      maxDistRef.current = Math.max(maxDist * 1.2, 10); // Ensure minimum of 10
+      maxDistRef.current = Math.max(maxDist * 1.2, 10);
     };
 
     // Load model progressively
     const loadModel = async () => {
       try {
-        const url = new URL(
-          'train.splat',
-          'https://huggingface.co/cakewalk/splat-data/resolve/main/',
-        );
-        const req = await fetch(url, {
-          mode: 'cors',
-          credentials: 'omit',
-        });
-
-        if (req.status !== 200) {
-          throw new Error(`${req.status} Unable to load ${req.url}`);
-        }
-
         const rowLength = 32;
-        const reader = req.body?.getReader();
-        if (!reader) {
-          throw new Error('Failed to get response reader');
+        let splatData: Uint8Array;
+        let contentLength: number;
+        let url: URL | null = null;
+
+        if (source === null) {
+          url = new URL('train.splat', 'https://huggingface.co/cakewalk/splat-data/resolve/main/');
+        } else if (typeof source === 'string') {
+          url = new URL(source);
         }
 
-        const contentLength = parseInt(req.headers.get('content-length') || '0');
-        const splatData = new Uint8Array(contentLength);
-        let bytesRead = 0;
-        let lastVertexCount = -1;
-        const totalVertexCount = Math.floor(contentLength / rowLength);
-        setTotalSplats(totalVertexCount);
+        if (url) {
+          const req = await fetch(url, {
+            mode: 'cors',
+            credentials: 'omit',
+          });
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          
-          if (value) {
-            splatData.set(value, bytesRead);
-            bytesRead += value.length;
+          if (req.status !== 200) {
+            throw new Error(`${req.status} Unable to load ${req.url}`);
           }
-          
-          const currentVertexCount = Math.floor(bytesRead / rowLength);
-          
-          if (currentVertexCount > lastVertexCount) {
-            phase1ProgressRef.current = currentVertexCount / totalVertexCount;
-            const downloadProgress = Math.round(phase1ProgressRef.current * 90);
-            
-            // Send only the valid slice to the worker (copies just the used bytes)
-            worker.postMessage({
-              buffer: splatData.slice(0, currentVertexCount * rowLength).buffer,
-              vertexCount: currentVertexCount,
-            });
-            
-            // Update scene bounds progressively (every 1000 splats or early on)
-            if (currentVertexCount % 1000 === 0 || currentVertexCount < 1000) {
-              calculateSceneBounds(splatData, currentVertexCount);
+
+          const reader = req.body?.getReader();
+          if (!reader) {
+            throw new Error('Failed to get response reader');
+          }
+
+          contentLength = parseInt(req.headers.get('content-length') || '0');
+          splatData = new Uint8Array(contentLength);
+          let bytesRead = 0;
+          let lastVertexCount = -1;
+          const totalVertexCount = Math.floor(contentLength / rowLength);
+
+          if (isCancelled) return;
+          setTotalSplats(totalVertexCount);
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            if (value) {
+              splatData.set(value, bytesRead);
+              bytesRead += value.length;
             }
-            
-            // Send view for depth sorting every 10 chunks during download
-            if (currentVertexCount % 10 === 0 && projectionMatrixRef.current.length > 0) {
-              const viewProj = multiply4(projectionMatrixRef.current, viewMatrixRef.current);
-              worker.postMessage({ view: viewProj });
-            }
-            
-            // Throttle React UI updates during download (~5fps)
-            const now = performance.now();
-            if (now - lastDownloadUiUpdateRef.current > 200) {
-              setVertexCount(currentVertexCount);
-              setAnimationProgress(downloadProgress);
-              lastDownloadUiUpdateRef.current = now;
-            }
-            
-            lastVertexCount = currentVertexCount;
-            
-            if (currentVertexCount > 0 && isLoading) {
-              setIsLoading(false);
+
+            const currentVertexCount = Math.floor(bytesRead / rowLength);
+
+            if (currentVertexCount > lastVertexCount) {
+              const downloadProgress = Math.round((bytesRead / contentLength) * 100);
+
+              // Send only the valid slice to the worker
+              worker.postMessage({
+                buffer: splatData.slice(0, currentVertexCount * rowLength).buffer,
+                vertexCount: currentVertexCount,
+              });
+
+              // Update scene bounds progressively
+              if (currentVertexCount % 1000 === 0 || currentVertexCount < 1000) {
+                calculateSceneBounds(splatData, currentVertexCount);
+              }
+
+              // Send view for depth sorting every 10 chunks during download
+              if (currentVertexCount % 10 === 0 && projectionMatrixRef.current.length > 0) {
+                const viewProj = multiply4(projectionMatrixRef.current, viewMatrixRef.current);
+                worker.postMessage({ view: viewProj });
+              }
+
+              // Throttle React UI updates during download (~5fps)
+              const now = performance.now();
+              if (now - lastDownloadUiUpdateRef.current > 200) {
+                if (isCancelled) return;
+                setVertexCount(currentVertexCount);
+                setProgress(downloadProgress);
+                lastDownloadUiUpdateRef.current = now;
+              }
+
+              lastVertexCount = currentVertexCount;
             }
           }
+        } else if (source instanceof File) {
+          const arrayBuffer = await source.arrayBuffer();
+          splatData = new Uint8Array(arrayBuffer);
+          contentLength = splatData.byteLength;
+          const totalVertexCount = Math.floor(contentLength / rowLength);
+
+          if (isCancelled) return;
+          setTotalSplats(totalVertexCount);
+
+          let offset = 0;
+          const chunkSize = 5000 * rowLength;
+          let lastVertexCount = -1;
+
+          while (offset < contentLength) {
+            const end = Math.min(offset + chunkSize, contentLength);
+            const currentVertexCount = Math.floor(end / rowLength);
+
+            if (currentVertexCount > lastVertexCount) {
+              const chunk = splatData.slice(0, end).buffer;
+              worker.postMessage({ buffer: chunk, vertexCount: currentVertexCount }, [chunk]);
+
+              // Update scene bounds progressively
+              if (currentVertexCount % 1000 === 0 || currentVertexCount < 1000) {
+                calculateSceneBounds(splatData, currentVertexCount);
+              }
+
+              // Send view for depth sorting
+              if (projectionMatrixRef.current.length > 0) {
+                const viewProj = multiply4(projectionMatrixRef.current, viewMatrixRef.current);
+                worker.postMessage({ view: viewProj });
+              }
+
+              // Throttle React UI updates
+              const now = performance.now();
+              if (now - lastDownloadUiUpdateRef.current > 200) {
+                if (isCancelled) return;
+                setVertexCount(currentVertexCount);
+                setProgress(Math.round((end / contentLength) * 100));
+                lastDownloadUiUpdateRef.current = now;
+              }
+
+              lastVertexCount = currentVertexCount;
+            }
+
+            offset = end;
+            // Yield to event loop
+            await new Promise((r) => setTimeout(r, 0));
+          }
+        } else {
+          throw new Error('Invalid source');
         }
 
-        // Download complete
+        if (isCancelled) return;
+
+        // Load complete
         downloadCompleteRef.current = true;
         calculateSceneBounds(splatData);
-        
+
         // Send final view for depth sorting
         if (projectionMatrixRef.current.length > 0) {
           const viewProj = multiply4(projectionMatrixRef.current, viewMatrixRef.current);
           worker.postMessage({ view: viewProj });
         }
-        
-        phase1ProgressRef.current = 1.0;
-        setAnimationProgress(90);
-        setAnimationPhase('downloading'); // Keep showing "downloading" until all splats ready
-        
-        if (isLoading) setIsLoading(false);
+
+        setProgress(100);
       } catch (err) {
+        if (isCancelled) return;
         console.error('Error loading model:', err);
         setError(err instanceof Error ? err.message : 'Failed to load model');
-        if (isLoading) setIsLoading(false);
       }
     };
 
@@ -667,59 +741,56 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
       if (shouldUpdateUi) {
         lastUiUpdateRef.current = now;
       }
-      
+
       const gl = glRef.current;
       const program = programRef.current;
       const worker = workerRef.current;
       const uniforms = uniformsRef.current;
-      
+
       if (!gl || !program || !worker || !uniforms) return;
 
-      // Check if download complete and all splats processed -> start phase 2
-      if (animationPhaseRef.current === 'downloading' && 
-          downloadCompleteRef.current && 
-          vertexCountRef.current >= totalSplatsRef.current && 
+      // Check if download complete and all splats processed -> start revealing
+      if (animationPhaseRef.current === 'downloading' &&
+          downloadCompleteRef.current &&
+          vertexCountRef.current >= totalSplatsRef.current &&
           totalSplatsRef.current > 0) {
-        
-        // Single trigger for phase transition
-        setAnimationPhase('hold');
-        animationPhaseRef.current = 'hold'; // Immediate ref update to prevent multiple triggers
-        
-        setTimeout(() => {
-          setAnimationPhase('revealing');
-          animationPhaseRef.current = 'revealing'; // Immediate ref update
-          phase2StartTimeRef.current = performance.now();
-          // Force an immediate depth sort so the model is correct from the start of the reveal
-          forceSortRef.current = true;
-          lastViewProjRef.current = [];
-        }, ANIMATION.DURATION_HOLD);
+
+        animationPhaseRef.current = 'revealing';
+        revealStartTimeRef.current = performance.now();
+        setPhase('holding');
+        forceSortRef.current = true;
+        lastViewProjRef.current = [];
       }
 
-          // Update phase 2 progress
-      if (animationPhaseRef.current === 'revealing' && phase2StartTimeRef.current) {
-        const elapsed = performance.now() - phase2StartTimeRef.current;
-        phase2ProgressRef.current = Math.min(elapsed / ANIMATION.DURATION_P2, 1);
-        const unifiedProgress = 90 + Math.round(phase2ProgressRef.current * 10);
-        
-        // Update internal progress ref for shader and completion check
-        animationProgressRef.current = unifiedProgress;
-        
-        // Sync UI state only if throttled and value changed
-        if (shouldUpdateUi) {
-          setAnimationProgress(unifiedProgress);
+      // Calculate animation uniforms
+      let elapsedMs = 0;
+      let showEverything = 0;
+
+      if (animationPhaseRef.current === 'revealing') {
+        elapsedMs = performance.now() - revealStartTimeRef.current;
+        if (elapsedMs >= TOTAL_DURATION) {
+          elapsedMs = TOTAL_DURATION;
+          animationPhaseRef.current = 'ready';
+          setPhase('ready');
         }
-      } else if (animationPhaseRef.current === 'hold' && shouldUpdateUi) {
-        animationProgressRef.current = 90;
-        setAnimationProgress(90);
+        showEverything = 0;
+      } else if (animationPhaseRef.current === 'downloading') {
+        elapsedMs = 0;
+        showEverything = 1;
+      } else if (animationPhaseRef.current === 'ready') {
+        elapsedMs = TOTAL_DURATION;
+        showEverything = 1;
       }
 
       // Update animation uniforms
-      gl.uniform1f(uniforms.phase1Progress, phase1ProgressRef.current);
-      gl.uniform1f(uniforms.phase2Progress, phase2ProgressRef.current);
-      gl.uniform1f(uniforms.maxDist, maxDistRef.current);
-      gl.uniform3fv(uniforms.sceneCenter, new Float32Array(sceneCenterRef.current));
-      // isPhase2 is true during revealing (including when it completes)
-      gl.uniform1f(uniforms.isPhase2, animationPhaseRef.current === 'revealing' ? 1.0 : 0.0);
+      gl.uniform1f(uniforms.u_elapsedMs, elapsedMs);
+      gl.uniform1f(uniforms.u_p1Dur, ANIMATION.DURATION_P1);
+      gl.uniform1f(uniforms.u_holdDur, ANIMATION.DURATION_HOLD);
+      gl.uniform1f(uniforms.u_p2Dur, ANIMATION.DURATION_P2);
+      gl.uniform1f(uniforms.u_showEverything, showEverything);
+      gl.uniform1f(uniforms.u_maxDist, maxDistRef.current);
+      gl.uniform3fv(uniforms.u_sceneCenter, new Float32Array(sceneCenterRef.current));
+      gl.uniform1f(uniforms.u_modelScale, modelScaleRef.current);
 
       // Process camera movement
       const invResult = invert4(viewMatrixRef.current);
@@ -727,7 +798,7 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
       let inv = invResult;
 
       const shiftKey = activeKeysRef.current.includes('Shift') || activeKeysRef.current.includes('ShiftLeft') || activeKeysRef.current.includes('ShiftRight');
-      
+
       if (activeKeysRef.current.includes('ArrowUp')) {
         if (shiftKey) inv = translate4(inv, 0, -0.03, 0);
         else inv = translate4(inv, 0, 0, 0.1);
@@ -771,40 +842,25 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
         inv2 = translate4(inv2, 0, -jumpDelta, 0);
         inv2 = rotate4(inv2, -0.1 * jumpDelta, 1, 0, 0);
         const actualViewMatrix = invert4(inv2);
-        
+
         if (actualViewMatrix) {
           const viewProj = multiply4(projectionMatrixRef.current, actualViewMatrix);
-          
-          // Sorting strategy:
-          // During revealing (unified phase), always sort by camera depth so the model is correct
-          const isRevealing = animationPhaseRef.current === 'revealing';
-          
-          // Always update lastViewProj so we track camera changes
-          const dot = lastViewProjRef.current.length > 0 
+
+          // Depth sort is CRITICAL for Gaussian Splatting alpha blending.
+          // Sort continuously whenever the camera moves, in ANY phase.
+          const dot = lastViewProjRef.current.length > 0
             ? lastViewProjRef.current[2] * viewProj[2] + lastViewProjRef.current[6] * viewProj[6] + lastViewProjRef.current[10] * viewProj[10]
             : 0;
-          
+
           const viewChanged = lastViewProjRef.current.length === 0 || Math.abs(dot - 1) > 0.01;
-          
-          if (isRevealing) {
-            const isRevealAnimationComplete = phase2ProgressRef.current >= 1.0;
-            // Only sort:
-            // 1) Once at the very start of revealing (force)
-            // 2) After the reveal wave animation is finished and the camera moves
-            const shouldSort = forceSortRef.current || (isRevealAnimationComplete && viewChanged);
-            
-            if (shouldSort) {
-              const force = forceSortRef.current;
-              worker.postMessage({ view: viewProj, force });
-              lastViewProjRef.current = viewProj;
-              if (forceSortRef.current) {
-                forceSortRef.current = false;
-              }
-            }
-          } else {
-            // Not revealing yet: just track view changes
-            if (viewChanged) {
-              lastViewProjRef.current = viewProj;
+          const shouldSort = forceSortRef.current || viewChanged;
+
+          if (shouldSort) {
+            const force = forceSortRef.current;
+            worker.postMessage({ view: viewProj, force });
+            lastViewProjRef.current = viewProj;
+            if (forceSortRef.current) {
+              forceSortRef.current = false;
             }
           }
 
@@ -813,26 +869,32 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
             const frameTime = now - lastFrameRef.current;
             const currentFps = frameTime > 0 ? 1000 / frameTime : 0;
             avgFpsRef.current = avgFpsRef.current * 0.9 + currentFps * 0.1;
-            updateFps(Math.round(avgFpsRef.current));
+            const roundedFps = Math.round(avgFpsRef.current);
+            const fpsNow = Date.now();
+            if (fpsNow - fpsUpdateRef.current > 500) {
+              setFps(roundedFps);
+              fpsUpdateRef.current = fpsNow;
+            }
           }
 
           // Render
           gl.uniformMatrix4fv(uniforms.view, false, actualViewMatrix);
           gl.clear(gl.COLOR_BUFFER_BIT);
-          
+
           const currentVertexCount = Math.min(vertexCountRef.current, lastTexturedVertexCountRef.current);
           if (currentVertexCount > 0) {
             gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, currentVertexCount);
           }
         }
       }
-      
+
       lastFrameRef.current = now;
     };
 
     frameIdRef.current = requestAnimationFrame(frame);
 
     return () => {
+      isCancelled = true;
       window.removeEventListener('resize', resize);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
@@ -847,7 +909,7 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
       canvas.removeEventListener('wheel', handleWheel);
       if (frameIdRef.current) cancelAnimationFrame(frameIdRef.current);
       worker.terminate();
-      
+
       // Clean up WebGL resources
       const glCleanup = glRef.current;
       if (glCleanup) {
@@ -869,18 +931,20 @@ export function useGaussianSplat(): UseGaussianSplatReturn {
         glCleanup.disableVertexAttribArray(1);
       }
     };
-  }, [updateFps]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source]);
 
   return {
     canvasRef,
-    isLoading,
-    error,
+    phase,
+    progress,
     fps,
+    error,
     vertexCount,
     totalSplats,
-    animationPhase,
-    animationProgress,
     carousel,
     setCarousel,
+    modelScale,
+    setModelScale,
   };
 }

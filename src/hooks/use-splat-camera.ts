@@ -1,11 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { 
-  getProjectionMatrix, 
-  invert4, 
-  rotate4, 
-  translate4,
-  multiply4 
-} from '@/lib/math';
+import { getProjectionMatrix, invert4, rotate4, translate4, multiply4 } from '@/lib/math';
 
 interface CameraState {
   viewMatrix: number[];
@@ -14,9 +8,9 @@ interface CameraState {
 }
 
 const DEFAULT_VIEW = [
-  0.47, 0.04, 0.88, 0, 
-  -0.11, 0.99, 0.02, 0, 
-  -0.88, -0.11, 0.47, 0, 
+  0.47, 0.04, 0.88, 0,
+  -0.11, 0.99, 0.02, 0,
+  -0.88, -0.11, 0.47, 0,
   0.07, 0.03, 6.55, 1,
 ];
 
@@ -29,24 +23,33 @@ export function useSplatCamera(canvasRef: React.RefObject<HTMLCanvasElement | nu
 
   const viewMatrixRef = useRef(DEFAULT_VIEW);
   const projectionMatrixRef = useRef<number[]>([]);
+  const focalRef = useRef({ fx: 1159.5880733038064, fy: 1164.6601287484507 });
   const activeKeysRef = useRef<Set<string>>(new Set());
   const mouseStateRef = useRef({ down: 0, lastX: 0, lastY: 0 });
 
-  // Handle Resize
   const handleResize = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
 
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-    canvas.width = Math.round(width);
-    canvas.height = Math.round(height);
+    const cssW = canvas.clientWidth || window.innerWidth;
+    const cssH = canvas.clientHeight || window.innerHeight;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
-    // Default focal lengths if no camera data provided yet
-    const fx = 1159, fy = 1164; 
-    const proj = getProjectionMatrix(fx, fy, width, height);
+    const fbW = Math.round(cssW * dpr);
+    const fbH = Math.round(cssH * dpr);
+    canvas.width = fbW;
+    canvas.height = fbH;
+
+    // Scale intrinsics by DPR so projected splat sizes stay constant in screen pixels
+    const baseFx = 1159.5880733038064;
+    const baseFy = 1164.6601287484507;
+    const fx = baseFx * dpr;
+    const fy = baseFy * dpr;
+    focalRef.current = { fx, fy };
+
+    const proj = getProjectionMatrix(fx, fy, fbW, fbH);
     projectionMatrixRef.current = proj;
-    
+
     setMatrices(prev => ({
       ...prev,
       projectionMatrix: proj,
@@ -55,12 +58,22 @@ export function useSplatCamera(canvasRef: React.RefObject<HTMLCanvasElement | nu
   }, [canvasRef]);
 
   useEffect(() => {
-    window.addEventListener('resize', handleResize);
     handleResize();
-    return () => window.removeEventListener('resize', handleResize);
-  }, [handleResize]);
+    window.addEventListener('resize', handleResize);
 
-  // Input Handlers
+    const canvas = canvasRef.current;
+    let ro: ResizeObserver | null = null;
+    if (canvas && 'ResizeObserver' in window) {
+      ro = new ResizeObserver(handleResize);
+      ro.observe(canvas);
+    }
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      if (ro) ro.disconnect();
+    };
+  }, [handleResize, canvasRef]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -81,32 +94,32 @@ export function useSplatCamera(canvasRef: React.RefObject<HTMLCanvasElement | nu
 
       const dx = (e.clientX - lastX) / window.innerWidth;
       const dy = (e.clientY - lastY) / window.innerHeight;
-      
+
       let inv = invert4(viewMatrixRef.current);
       if (!inv) return;
 
-      if (down === 1) { // Rotate
+      if (down === 1) {
         inv = translate4(inv, 0, 0, 4);
         inv = rotate4(inv, 5 * dx, 0, 1, 0);
         inv = rotate4(inv, -5 * dy, 1, 0, 0);
         inv = translate4(inv, 0, 0, -4);
-      } else { // Pan/Zoom
+      } else {
         inv = translate4(inv, -10 * dx, 0, 10 * dy);
       }
 
       const nextView = invert4(inv);
       if (nextView) viewMatrixRef.current = nextView;
-      
+
       mouseStateRef.current.lastX = e.clientX;
       mouseStateRef.current.lastY = e.clientY;
     };
 
-    const onMouseUp = () => mouseStateRef.current.down = 0;
+    const onMouseUp = () => (mouseStateRef.current.down = 0);
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       let inv = invert4(viewMatrixRef.current);
       if (!inv) return;
-      
+
       if (e.shiftKey) {
         inv = translate4(inv, e.deltaX / 500, e.deltaY / 500, 0);
       } else {
@@ -137,10 +150,9 @@ export function useSplatCamera(canvasRef: React.RefObject<HTMLCanvasElement | nu
     };
   }, [canvasRef]);
 
-  // Movement update function
   const updateMovement = useCallback((carouselVisible: boolean) => {
     const keys = activeKeysRef.current;
-    
+
     if (carouselVisible) {
       const t = performance.now() / 3000;
       let inv = invert4(DEFAULT_VIEW);
@@ -158,7 +170,7 @@ export function useSplatCamera(canvasRef: React.RefObject<HTMLCanvasElement | nu
     if (!inv) return false;
 
     const speed = keys.has('ShiftLeft') || keys.has('ShiftRight') ? 0.1 : 0.03;
-    
+
     if (keys.has('KeyW') || keys.has('ArrowUp')) inv = translate4(inv, 0, 0, speed);
     if (keys.has('KeyS') || keys.has('ArrowDown')) inv = translate4(inv, 0, 0, -speed);
     if (keys.has('KeyA') || keys.has('ArrowLeft')) inv = translate4(inv, -speed, 0, 0);
@@ -182,7 +194,16 @@ export function useSplatCamera(canvasRef: React.RefObject<HTMLCanvasElement | nu
     viewMatrixRef.current = DEFAULT_VIEW;
   }, []);
 
-  // Sync matrices to state
+  const frameScene = useCallback((center: [number, number, number], maxDist: number) => {
+    const distance = Math.max(maxDist * 2.5, 10);
+    viewMatrixRef.current = [
+      1, 0, 0, 0,
+      0, 1, 0, 0,
+      0, 0, 1, 0,
+      -center[0], -center[1], -(center[2] + distance), 1,
+    ];
+  }, []);
+
   const syncMatrices = useCallback(() => {
     const viewProj = multiply4(projectionMatrixRef.current, viewMatrixRef.current);
     setMatrices({
@@ -193,12 +214,14 @@ export function useSplatCamera(canvasRef: React.RefObject<HTMLCanvasElement | nu
     return viewProj;
   }, []);
 
-  return { 
-    matrices, 
-    updateMovement, 
-    syncMatrices, 
-    resetCamera, 
-    viewMatrixRef, 
-    projectionMatrixRef 
+  return {
+    matrices,
+    updateMovement,
+    syncMatrices,
+    resetCamera,
+    frameScene,
+    viewMatrixRef,
+    projectionMatrixRef,
+    focalRef,
   };
 }

@@ -1,198 +1,163 @@
-import { useRef, useState, useCallback, useEffect } from 'react';
-import { useSplatLoader } from '@/hooks/use-splat-loader';
-import { useSplatCamera } from '@/hooks/use-splat-camera';
-import { useSplatRenderer } from '@/hooks/use-splat-renderer';
+import { useRef, useState, useEffect } from 'react';
+import { useGaussianSplatV3 } from '@/hooks/useGaussianSplatV3';
 import { ViewerHUD } from './ViewerHUD';
-import { ANIMATION } from '@/lib/shaders';
-
-const MODEL_URL = 'https://huggingface.co/cakewalk/splat-data/resolve/main/train.splat';
+import { Upload, FolderOpen } from 'lucide-react';
 
 export function GaussianSplatViewer() {
-  // 1. All Hooks & Refs at the top for consistency
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const [fps, setFps] = useState(0);
-  const [carousel, setCarousel] = useState(false);
-  const [animationPhase, setAnimationPhase] = useState<'revealing' | 'ready' | 'downloading'>('downloading');
-  // const [revealProgress, setRevealProgress] = useState(0); // unused
+  const [source, setSource] = useState<string | File | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Animation & Rendering State Refs
-  const phaseRef = useRef<'idle' | 'revealing' | 'ready'>('idle');
-  const revealStartTimeRef = useRef(0);
-  const sceneBoundsRef = useRef({ center: [0, 0, 0] as [number, number, number], maxDist: 10 });
-  const lastFpsUpdateRef = useRef(0);
-  const frameCountRef = useRef(0);
-  const rendererInstanceRef = useRef<any>(null);
-  const rendererDataRef = useRef<any>({ uniforms: {}, vertexCount: 0 });
+  const {
+    containerRef,
+    phase,
+    progress,
+    fps,
+    error,
+    vertexCount,
+    totalSplats,
+    carousel,
+    setCarousel,
+    loadSource,
+  } = useGaussianSplatV3();
 
-  // 2. Stable Callbacks (using refs to avoid circular dependencies)
-  const onTextureUpdate = useCallback(({ texdata, texwidth, texheight }: any) => {
-    rendererInstanceRef.current?.updateTexture(texdata, texwidth, texheight);
-  }, []);
-
-  const onDepthUpdate = useCallback((depthIndex: Uint32Array) => {
-    rendererInstanceRef.current?.updateDepthIndex(depthIndex);
-  }, []);
-
-  const onBoundsUpdate = useCallback((bounds: any) => {
-    sceneBoundsRef.current = bounds;
-  }, []);
-
-  // 3. Service Hooks
-  const loader = useSplatLoader({
-    url: MODEL_URL,
-    onTextureUpdate,
-    onDepthUpdate,
-    onBoundsUpdate
-  });
-  const { phase: loadPhase, progress: _loadProgress, vertexCount, totalSplats, error, sendViewToSort } = loader;
-
-  const camera = useSplatCamera(canvasRef);
-  const { syncMatrices, updateMovement } = camera;
-  const cameraRef = useRef(camera);
-  cameraRef.current = camera;
-
-  // Handle Phase Transitions - Fluid (Network based)
-  const isActuallyReady = loadPhase === 'ready' && vertexCount > 0;
-
+  // Load source when it changes (skip initial null)
   useEffect(() => {
-    // Start revealing ONLY when download is fully complete and processed in GPU
-    if (isActuallyReady && phaseRef.current === 'idle') {
-      console.log('--- STARTING REVEAL ---');
-      phaseRef.current = 'revealing';
-      setAnimationPhase('revealing');
-      revealStartTimeRef.current = performance.now();
+    if (source) {
+      loadSource(source);
     }
-  }, [isActuallyReady]);
+  }, [source, loadSource]);
 
-  // Keep state in refs for the stable render loop
-  const stateRef = useRef({ carousel, vertexCount, loadPhase, animationPhase, totalSplats });
-  stateRef.current = { carousel, vertexCount, loadPhase, animationPhase, totalSplats };
+  const handleFileSelect = (file: File) => {
+    if (!file.name.endsWith('.splat')) {
+      alert('Por favor selecciona un archivo .splat');
+      return;
+    }
+    setSource(file);
+  };
 
-  // 3. Stable Render Loop Callback
-  const onFrame = useCallback((now: number) => {
-    const gl = rendererInstanceRef.current?.gl;
-    const program = rendererInstanceRef.current?.program;
-    const { carousel: curCarousel, vertexCount: curVC, loadPhase: _curLoadPhase } = stateRef.current;
-    
-    // Use refs for matrices to keep this function stable
-    const viewMat = cameraRef.current.viewMatrixRef.current;
-    const projMat = cameraRef.current.projectionMatrixRef.current;
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) handleFileSelect(file);
+  };
 
-    if (!gl || !program || !projMat.length || curVC === 0) return;
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    const file = e.dataTransfer.files?.[0];
+    if (file) handleFileSelect(file);
+  };
 
-      // Update Movement
-      const moved = updateMovement(curCarousel);
-      
-      // Update Matrices
-      const viewProj = syncMatrices();
-      
-      // Update Sorting if moved
-      if (moved || frameCountRef.current % 10 === 0) {
-        sendViewToSort(viewProj);
-      }
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
 
-      const TOTAL_DURATION = ANIMATION.DURATION_P1 + ANIMATION.DURATION_HOLD + ANIMATION.DURATION_P2;
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
 
-      // Animation calculations
-      let elapsed = TOTAL_DURATION;
-
-      if (phaseRef.current === 'revealing') {
-        elapsed = (now - revealStartTimeRef.current);
-        
-        if (elapsed >= TOTAL_DURATION) {
-          elapsed = TOTAL_DURATION;
-          phaseRef.current = 'ready';
-          setAnimationPhase('ready');
-        }
-      } else if (phaseRef.current === 'idle') {
-        elapsed = 0.0;
-      }
-
-      const drawCount = rendererInstanceRef.current?.currentVertexCountRef?.current || 0;
-      if (drawCount === 0) return;
-
-      // Set Uniforms
-      const u = rendererDataRef.current.uniforms;
-      if (!u.projection) return; // Wait for uniforms to be cached
-
-      gl.useProgram(program);
-      gl.uniformMatrix4fv(u.projection, false, projMat);
-      gl.uniformMatrix4fv(u.view, false, viewMat);
-      
-      // V3 Uniforms
-      gl.uniform1f(u.u_elapsedMs, elapsed);
-      gl.uniform1f(u.u_p1Dur, ANIMATION.DURATION_P1);
-      gl.uniform1f(u.u_holdDur, ANIMATION.DURATION_HOLD);
-      gl.uniform1f(u.u_p2Dur, ANIMATION.DURATION_P2);
-      gl.uniform1f(u.u_showEverything, (phaseRef.current === 'idle' && !isActuallyReady) ? 1.0 : 0.0);
-      
-      gl.uniform1f(u.u_maxDist, sceneBoundsRef.current.maxDist);
-      gl.uniform3fv(u.u_sceneCenter, sceneBoundsRef.current.center);
-      
-      // Resolution uniforms
-      gl.uniform2f(u.focal, 1159, 1164); 
-      gl.uniform2f(u.viewport, gl.canvas.width, gl.canvas.height);
-
-      // Draw
-      gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
-      gl.clearColor(0, 0, 0, 0);
-      gl.clear(gl.COLOR_BUFFER_BIT);
-      gl.drawArraysInstanced(gl.TRIANGLE_FAN, 0, 4, drawCount);
-
-      // FPS Calculation
-      frameCountRef.current++;
-      if (now - lastFpsUpdateRef.current > 1000) {
-        setFps(frameCountRef.current);
-        frameCountRef.current = 0;
-        lastFpsUpdateRef.current = now;
-      }
-  }, [updateMovement, syncMatrices, sendViewToSort]);
-
-  // 3. Renderer Hook
-  const renderer = useSplatRenderer({
-    canvasRef,
-    onFrame
-  });
-
-  // Final State Sync
-  rendererDataRef.current.uniforms = renderer.uniforms;
-  rendererDataRef.current.vertexCount = vertexCount;
-
-  // Order of effects matters for Hook Order consistency! Keep them grouped.
-  useEffect(() => {
-    rendererInstanceRef.current = renderer;
-  }, [renderer]);
+  const openFilePicker = () => fileInputRef.current?.click();
+  const loadDemo = () => setSource('https://huggingface.co/cakewalk/splat-data/resolve/main/train.splat');
 
   if (error) {
     return (
       <div className="w-full h-screen bg-black flex items-center justify-center text-white p-10 text-center">
         <div className="bg-red-500/10 border border-red-500/20 p-8 rounded-3xl backdrop-blur-xl">
-           <h2 className="text-2xl font-bold text-red-400 mb-2">Renderer Error</h2>
-           <p className="text-white/60 text-sm max-w-md">{error}</p>
+          <h2 className="text-2xl font-bold text-red-400 mb-2">Renderer Error</h2>
+          <p className="text-white/60 text-sm max-w-md">{error}</p>
+          <button
+            onClick={openFilePicker}
+            className="mt-6 flex items-center gap-2 mx-auto bg-white/10 hover:bg-white/20 text-white px-5 py-2.5 rounded-xl transition-all text-sm font-medium"
+          >
+            <FolderOpen className="w-4 h-4" />
+            Intentar con otro archivo
+          </button>
         </div>
       </div>
     );
   }
 
+  const showSelector = !source;
+
   return (
-    <div className="relative w-full h-screen bg-black overflow-hidden font-sans select-none">
-      <canvas
-        ref={canvasRef}
-        className="absolute inset-0 w-full h-full block touch-none cursor-move"
-      />
-      
-      <ViewerHUD
-        phase={animationPhase === 'revealing' ? 'holding' : (phaseRef.current === 'ready' ? 'ready' : 'downloading')}
-        progress={phaseRef.current === 'ready' || animationPhase === 'revealing' || isActuallyReady ? 100 : Math.round((vertexCount / (totalSplats || 1)) * 100)}
-        vertexCount={vertexCount}
-        totalSplats={totalSplats}
-        fps={fps}
-        carousel={carousel}
-        setCarousel={setCarousel}
-        error={error}
+    <div
+      className="relative w-full h-screen bg-black overflow-hidden font-sans select-none"
+      onDrop={handleDrop}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+    >
+      <div
+        ref={containerRef}
+        className="absolute inset-0 w-full h-full"
       />
 
-      {/* Subtle Overlay effects */}
+      {showSelector && (
+        <div className={`absolute inset-0 z-50 flex items-center justify-center transition-colors duration-200 ${isDragging ? 'bg-cyan-500/10' : 'bg-black/80'}`}>
+          <div className={`text-center p-12 rounded-3xl border-2 border-dashed transition-all duration-200 max-w-md mx-4 ${isDragging ? 'border-cyan-400 bg-cyan-500/10 scale-105' : 'border-white/20 bg-white/5'}`}>
+            <div className="w-16 h-16 rounded-2xl bg-white/10 flex items-center justify-center mx-auto mb-6">
+              <Upload className={`w-8 h-8 transition-colors ${isDragging ? 'text-cyan-400' : 'text-white/60'}`} />
+            </div>
+            <h2 className="text-xl font-bold text-white mb-2">Cargar modelo Splat</h2>
+            <p className="text-sm text-white/50 mb-8">
+              Arrastra un archivo <code className="bg-white/10 px-1.5 py-0.5 rounded text-white/70 text-xs">.splat</code> aquí<br />o selecciónalo desde tu equipo
+            </p>
+            <div className="flex flex-col gap-3 items-center">
+              <button
+                onClick={openFilePicker}
+                className="flex items-center gap-2 bg-white/10 hover:bg-white/20 text-white px-6 py-3 rounded-xl transition-all text-sm font-medium border border-white/10 hover:border-white/20"
+              >
+                <FolderOpen className="w-4 h-4" />
+                Seleccionar archivo
+              </button>
+              <button
+                onClick={loadDemo}
+                className="text-white/40 hover:text-white px-4 py-2 rounded-xl transition-all text-xs font-medium"
+              >
+                o probar con el modelo demo (train.splat)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {!showSelector && (
+        <>
+          <ViewerHUD
+            phase={phase}
+            progress={progress}
+            vertexCount={vertexCount}
+            totalSplats={totalSplats}
+            fps={fps}
+            carousel={carousel}
+            setCarousel={setCarousel}
+            error={error}
+          />
+
+          <div className="absolute top-6 right-6 z-50 pointer-events-auto">
+            <button
+              onClick={openFilePicker}
+              className="flex items-center gap-2 bg-black/40 hover:bg-black/60 backdrop-blur-xl text-white/70 hover:text-white px-4 py-2 rounded-xl transition-all text-xs font-medium border border-white/10"
+            >
+              <FolderOpen className="w-3.5 h-3.5" />
+              Cambiar modelo
+            </button>
+          </div>
+        </>
+      )}
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".splat"
+        hidden
+        onChange={handleInputChange}
+      />
+
       <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_center,transparent_0%,rgba(0,0,0,0.4)_100%)]" />
     </div>
   );
