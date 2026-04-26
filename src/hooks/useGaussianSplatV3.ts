@@ -260,7 +260,7 @@ export function useGaussianSplatV3(): UseGaussianSplatV3Return {
     viewer
       .addSplatScene(fileUrl, {
         showLoadingUI: false,
-        progressiveLoad: true,
+        progressiveLoad: false,
         format: GaussianSplats3D.SceneFormat.Splat,
       })
       .then(async () => {
